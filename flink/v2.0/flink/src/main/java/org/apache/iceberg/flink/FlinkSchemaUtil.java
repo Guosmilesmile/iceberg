@@ -20,10 +20,13 @@ package org.apache.iceberg.flink;
 
 import java.util.List;
 import java.util.Set;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.ResolvedSchema;
+import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.legacy.api.TableSchema;
+import org.apache.flink.table.runtime.typeutils.InternalSerializers;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.utils.TypeConversions;
@@ -230,5 +233,20 @@ public class FlinkSchemaUtil {
     }
 
     return builder.build();
+  }
+
+  public static TypeSerializer[] createFieldSerializers(RowType rowType) {
+    return rowType.getChildren().stream()
+            .map(InternalSerializers::create)
+            .toArray(TypeSerializer[]::new);
+  }
+
+  public static RowData.FieldGetter[] createFieldGetters(RowType rowType) {
+    RowData.FieldGetter[] fieldGetters = new RowData.FieldGetter[rowType.getFieldCount()];
+    for (int i = 0; i < rowType.getFieldCount(); ++i) {
+      fieldGetters[i] = RowData.createFieldGetter(rowType.getTypeAt(i), i);
+    }
+
+    return fieldGetters;
   }
 }
