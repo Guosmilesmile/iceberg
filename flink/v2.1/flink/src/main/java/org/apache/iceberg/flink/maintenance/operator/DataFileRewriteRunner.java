@@ -242,15 +242,15 @@ public class DataFileRewriteRunner
         groupFilesBySizeWithConstraints(
             group.rewrittenFiles(), group.expectedOutputFiles(), group.maxOutputFileSize());
 
+    OutputFileFactory outputFileFactory =
+            OutputFileFactory.builderFor(table, taskIndex, attemptId)
+                    .format(FileFormat.PARQUET)
+                    .ioSupplier(table::io)
+                    .defaultSpec(table.spec())
+                    .build();
+
     Set<DataFile> resultFileSet = Sets.newHashSet();
     for (List<DataFile> dataFiles : rewrittenFilesList) {
-      OutputFileFactory outputFileFactory =
-          OutputFileFactory.builderFor(table, taskIndex, attemptId)
-              .format(FileFormat.PARQUET)
-              .ioSupplier(table::io)
-              .defaultSpec(table.spec())
-              .build();
-
       OutputFile outputFile =
           outputFileFactory.newOutputFile(group.info().partition()).encryptingOutputFile();
       List<InputFile> inputFiles =
