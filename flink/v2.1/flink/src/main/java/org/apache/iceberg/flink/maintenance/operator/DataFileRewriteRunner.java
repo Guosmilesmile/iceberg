@@ -238,19 +238,19 @@ public class DataFileRewriteRunner
 
   private Set<DataFile> rewriteDataFilesUseParquetMerge(RewriteFileGroup group, Table table)
       throws IOException {
-    OutputFileFactory outputFileFactory =
-        OutputFileFactory.builderFor(table, taskIndex, attemptId)
-            .format(FileFormat.PARQUET)
-            .ioSupplier(table::io)
-            .defaultSpec(table.spec())
-            .build();
-
     List<List<DataFile>> rewrittenFilesList =
         groupFilesBySizeWithConstraints(
             group.rewrittenFiles(), group.expectedOutputFiles(), group.maxOutputFileSize());
 
     Set<DataFile> resultFileSet = Sets.newHashSet();
     for (List<DataFile> dataFiles : rewrittenFilesList) {
+      OutputFileFactory outputFileFactory =
+          OutputFileFactory.builderFor(table, taskIndex, attemptId)
+              .format(FileFormat.PARQUET)
+              .ioSupplier(table::io)
+              .defaultSpec(table.spec())
+              .build();
+
       OutputFile outputFile =
           outputFileFactory.newOutputFile(group.info().partition()).encryptingOutputFile();
       List<InputFile> inputFiles =

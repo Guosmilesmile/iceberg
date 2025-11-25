@@ -34,6 +34,8 @@ import java.util.stream.StreamSupport;
 import org.apache.flink.streaming.api.graph.StreamGraphGenerator;
 import org.apache.iceberg.ManifestFiles;
 import org.apache.iceberg.MetadataColumns;
+import org.apache.iceberg.Parameter;
+import org.apache.iceberg.Parameters;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.Table;
@@ -45,6 +47,15 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
 
 class TestRewriteDataFiles extends MaintenanceTaskTestBase {
+
+  @Parameter(index = 0)
+  private boolean openParquetMerge;
+
+  @Parameters(name = "openParquetMerge = {0}")
+  private static Object[][] parameters() {
+    return new Object[][] {{false}, {true}};
+  }
+
   @Test
   void testRewriteUnpartitioned() throws Exception {
     Table table = createTable();
@@ -64,6 +75,7 @@ class TestRewriteDataFiles extends MaintenanceTaskTestBase {
             .maxFileSizeBytes(2_000_000L)
             .minFileSizeBytes(500_000L)
             .minInputFiles(2)
+            .openParquetMerge(openParquetMerge)
             .partialProgressEnabled(true)
             .partialProgressMaxCommits(1)
             .maxRewriteBytes(100_000L)
@@ -101,6 +113,7 @@ class TestRewriteDataFiles extends MaintenanceTaskTestBase {
             .maxFileSizeBytes(2_000_000L)
             .minFileSizeBytes(500_000L)
             .minInputFiles(2)
+            .openParquetMerge(openParquetMerge)
             .partialProgressEnabled(true)
             .partialProgressMaxCommits(1)
             .maxRewriteBytes(100_000L)
@@ -143,6 +156,7 @@ class TestRewriteDataFiles extends MaintenanceTaskTestBase {
             .maxFileSizeBytes(2_000_000L)
             .minFileSizeBytes(500_000L)
             .minInputFiles(2)
+            .openParquetMerge(openParquetMerge)
             .partialProgressEnabled(true)
             .partialProgressMaxCommits(1)
             .maxRewriteBytes(100_000L)
@@ -530,7 +544,8 @@ class TestRewriteDataFiles extends MaintenanceTaskTestBase {
   }
 
   private void appendRewriteDataFiles() {
-    appendRewriteDataFiles(RewriteDataFiles.builder().rewriteAll(true));
+    appendRewriteDataFiles(
+        RewriteDataFiles.builder().openParquetMerge(openParquetMerge).rewriteAll(true));
   }
 
   private void appendRewriteDataFiles(RewriteDataFiles.Builder builder) {
