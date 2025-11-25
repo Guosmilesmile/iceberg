@@ -35,6 +35,9 @@ import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileContent;
 import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.Parameter;
+import org.apache.iceberg.ParameterizedTestExtension;
+import org.apache.iceberg.Parameters;
 import org.apache.iceberg.PartitionData;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
@@ -55,33 +58,31 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.api.TestTemplate;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(ParameterizedTestExtension.class)
 class TestDataFileRewriteRunner extends OperatorTestBase {
-  @ParameterizedTest
-  @ValueSource(booleans = {true, false})
-  void testExecute(boolean partitioned) throws Exception {
-    Table table;
-    PartitionData partition;
-    if (partitioned) {
-      table = createPartitionedTable();
-      partition = new PartitionData(table.spec().partitionType());
-      partition.set(0, "p1");
-      insertPartitioned(table, 1, "p1");
-      insertPartitioned(table, 2, "p1");
-      insertPartitioned(table, 3, "p1");
-    } else {
-      table = createTable();
-      partition = new PartitionData(PartitionSpec.unpartitioned().partitionType());
-      insert(table, 1, "p1");
-      insert(table, 2, "p1");
-      insert(table, 3, "p1");
-    }
+
+  @Parameter(index = 0)
+  private boolean openParquetMerge;
+
+  @Parameters(name = "openParquetMerge = {0}")
+  private static Object[][] parameters() {
+    return new Object[][] {{false}, {true}};
+  }
+
+  @TestTemplate
+  void testExecuteUnpartitioned() throws Exception {
+    Table table = createTable();
+    PartitionData partition = new PartitionData(PartitionSpec.unpartitioned().partitionType());
+    insert(table, 1, "p1");
+    insert(table, 2, "p1");
+    insert(table, 3, "p1");
 
     List<DataFileRewritePlanner.PlannedGroup> planned = planDataFileRewrite(tableLoader());
     assertThat(planned).hasSize(1);
-    List<DataFileRewriteRunner.ExecutedGroup> actual = executeRewrite(planned);
+    List<DataFileRewriteRunner.ExecutedGroup> actual = executeRewrite(planned, openParquetMerge);
     assertThat(actual).hasSize(1);
 
     assertRewriteFileGroup(
@@ -95,7 +96,32 @@ class TestDataFileRewriteRunner extends OperatorTestBase {
         ImmutableSet.of(partition));
   }
 
-  @Test
+  @TestTemplate
+  void testExecutePartitioned() throws Exception {
+    Table table = createPartitionedTable();
+    PartitionData partition = new PartitionData(table.spec().partitionType());
+    partition.set(0, "p1");
+    insertPartitioned(table, 1, "p1");
+    insertPartitioned(table, 2, "p1");
+    insertPartitioned(table, 3, "p1");
+
+    List<DataFileRewritePlanner.PlannedGroup> planned = planDataFileRewrite(tableLoader());
+    assertThat(planned).hasSize(1);
+    List<DataFileRewriteRunner.ExecutedGroup> actual = executeRewrite(planned, openParquetMerge);
+    assertThat(actual).hasSize(1);
+
+    assertRewriteFileGroup(
+        actual.get(0),
+        table,
+        records(
+            table.schema(),
+            ImmutableSet.of(
+                ImmutableList.of(1, "p1"), ImmutableList.of(2, "p1"), ImmutableList.of(3, "p1"))),
+        1,
+        ImmutableSet.of(partition));
+  }
+
+  @TestTemplate
   void testPartitionSpecChange() throws Exception {
     Table table = createPartitionedTable();
     insertPartitioned(table, 1, "p1");
@@ -108,7 +134,10 @@ class TestDataFileRewriteRunner extends OperatorTestBase {
         testHarness =
             ProcessFunctionTestHarnesses.forProcessFunction(
                 new DataFileRewriteRunner(
-                    OperatorTestBase.DUMMY_TABLE_NAME, OperatorTestBase.DUMMY_TABLE_NAME, 0))) {
+                    OperatorTestBase.DUMMY_TABLE_NAME,
+                    OperatorTestBase.DUMMY_TABLE_NAME,
+                    0,
+                    openParquetMerge))) {
       testHarness.open();
 
       List<DataFileRewritePlanner.PlannedGroup> planned = planDataFileRewrite(tableLoader());
@@ -196,7 +225,7 @@ class TestDataFileRewriteRunner extends OperatorTestBase {
     }
   }
 
-  @Test
+  @TestTemplate
   void testError() throws Exception {
     Table table = createTable();
     insert(table, 1, "a");
@@ -207,7 +236,10 @@ class TestDataFileRewriteRunner extends OperatorTestBase {
         testHarness =
             ProcessFunctionTestHarnesses.forProcessFunction(
                 new DataFileRewriteRunner(
-                    OperatorTestBase.DUMMY_TABLE_NAME, OperatorTestBase.DUMMY_TABLE_NAME, 0))) {
+                    OperatorTestBase.DUMMY_TABLE_NAME,
+                    OperatorTestBase.DUMMY_TABLE_NAME,
+                    0,
+                    openParquetMerge))) {
       testHarness.open();
 
       List<DataFileRewritePlanner.PlannedGroup> planned = planDataFileRewrite(tableLoader());
@@ -228,7 +260,7 @@ class TestDataFileRewriteRunner extends OperatorTestBase {
     }
   }
 
-  @Test
+  @TestTemplate
   void testV2Table() throws Exception {
     Table table = createTableWithDelete();
     update(table, 1, null, "a", "b");
@@ -237,7 +269,7 @@ class TestDataFileRewriteRunner extends OperatorTestBase {
     List<DataFileRewritePlanner.PlannedGroup> planned = planDataFileRewrite(tableLoader());
     assertThat(planned).hasSize(1);
 
-    List<DataFileRewriteRunner.ExecutedGroup> actual = executeRewrite(planned);
+    List<DataFileRewriteRunner.ExecutedGroup> actual = executeRewrite(planned, openParquetMerge);
     assertThat(actual).hasSize(1);
 
     assertRewriteFileGroup(
@@ -257,7 +289,7 @@ class TestDataFileRewriteRunner extends OperatorTestBase {
     List<DataFileRewritePlanner.PlannedGroup> planned = planDataFileRewrite(tableLoader());
     assertThat(planned).hasSize(1);
 
-    List<DataFileRewriteRunner.ExecutedGroup> actual = executeRewrite(planned);
+    List<DataFileRewriteRunner.ExecutedGroup> actual = executeRewrite(planned, openParquetMerge);
     assertThat(actual).hasSize(1);
 
     assertRewriteFileGroup(
@@ -268,7 +300,7 @@ class TestDataFileRewriteRunner extends OperatorTestBase {
         ImmutableSet.of(new PartitionData(PartitionSpec.unpartitioned().partitionType())));
   }
 
-  @Test
+  @TestTemplate
   void testSplitSize() throws Exception {
     Table table = createTable();
 
@@ -318,7 +350,7 @@ class TestDataFileRewriteRunner extends OperatorTestBase {
       assertThat(planned).hasSize(1);
     }
 
-    List<DataFileRewriteRunner.ExecutedGroup> actual = executeRewrite(planned);
+    List<DataFileRewriteRunner.ExecutedGroup> actual = executeRewrite(planned, openParquetMerge);
     assertThat(actual).hasSize(1);
 
     assertRewriteFileGroup(

@@ -59,6 +59,7 @@ public class RewriteDataFiles {
     private final Map<String, String> rewriteOptions = Maps.newHashMapWithExpectedSize(6);
     private long maxRewriteBytes = Long.MAX_VALUE;
     private Expression filter = Expressions.alwaysTrue();
+    private boolean openParquetMerge = false;
 
     @Override
     String maintenanceTaskName() {
@@ -206,6 +207,16 @@ public class RewriteDataFiles {
     }
 
     /**
+     * Configures whether to open parquet merge.
+     *
+     * @param newOpenParquetMerge whether to open parquet merge
+     */
+    public Builder openParquetMerge(boolean newOpenParquetMerge) {
+      this.openParquetMerge = newOpenParquetMerge;
+      return this;
+    }
+
+    /**
      * Configures the properties for the rewriter.
      *
      * @param rewriteDataFilesConfig properties for the rewriter
@@ -258,7 +269,8 @@ public class RewriteDataFiles {
       SingleOutputStreamOperator<DataFileRewriteRunner.ExecutedGroup> rewritten =
           planned
               .rebalance()
-              .process(new DataFileRewriteRunner(tableName(), taskName(), index()))
+              .process(
+                  new DataFileRewriteRunner(tableName(), taskName(), index(), openParquetMerge))
               .name(operatorName(REWRITE_TASK_NAME))
               .uid(REWRITE_TASK_NAME + uidSuffix())
               .slotSharingGroup(slotSharingGroup())
