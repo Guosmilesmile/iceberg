@@ -243,11 +243,11 @@ public class DataFileRewriteRunner
             group.rewrittenFiles(), group.expectedOutputFiles(), group.maxOutputFileSize());
 
     OutputFileFactory outputFileFactory =
-            OutputFileFactory.builderFor(table, taskIndex, attemptId)
-                    .format(FileFormat.PARQUET)
-                    .ioSupplier(table::io)
-                    .defaultSpec(table.spec())
-                    .build();
+        OutputFileFactory.builderFor(table, taskIndex, attemptId)
+            .format(FileFormat.PARQUET)
+            .ioSupplier(table::io)
+            .defaultSpec(table.spec())
+            .build();
 
     Set<DataFile> resultFileSet = Sets.newHashSet();
     for (List<DataFile> dataFiles : rewrittenFilesList) {
@@ -280,6 +280,14 @@ public class DataFileRewriteRunner
     boolean preserveRowId = TableUtil.supportsRowLineage(table);
     if (preserveRowId) {
       LOG.debug("Cannot use row-group merge for V3+ table");
+      return false;
+    }
+
+    boolean fileSizeBiggerThanMaxSize =
+        group.rewrittenFiles().stream()
+            .anyMatch(file -> file.fileSizeInBytes() > group.maxOutputFileSize());
+    if (fileSizeBiggerThanMaxSize) {
+      LOG.debug("Cannot use row-group merge: file size is bigger than max size");
       return false;
     }
 

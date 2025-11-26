@@ -57,7 +57,6 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestTemplate;
 import org.junit.jupiter.api.extension.ExtendWith;
 
@@ -280,7 +279,7 @@ class TestDataFileRewriteRunner extends OperatorTestBase {
         ImmutableSet.of(new PartitionData(PartitionSpec.unpartitioned().partitionType())));
   }
 
-  @Test
+  @TestTemplate
   void testV3Table() throws Exception {
     Table table = createTableWithDelete(3);
     update(table, 1, null, "a", "b", 3);
