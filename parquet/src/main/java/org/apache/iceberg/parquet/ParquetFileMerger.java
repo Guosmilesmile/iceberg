@@ -26,7 +26,6 @@ import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetFileWriter;
-import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.schema.MessageType;
 
 /**
@@ -86,7 +85,10 @@ public class ParquetFileMerger {
    * @throws IllegalArgumentException if no input files provided or schemas don't match
    */
   public static void mergeFiles(
-      List<InputFile> inputFiles, OutputFile outputFile, Map<String, String> extraMetadata)
+      List<InputFile> inputFiles,
+      OutputFile outputFile,
+      long rowGroupSize,
+      Map<String, String> extraMetadata)
       throws IOException {
     Preconditions.checkArgument(
         inputFiles != null && !inputFiles.isEmpty(), "No input files provided for merging");
@@ -115,11 +117,7 @@ public class ParquetFileMerger {
     org.apache.parquet.io.OutputFile parquetOutputFile = ParquetIO.file(outputFile);
     try (ParquetFileWriter writer =
         new ParquetFileWriter(
-            parquetOutputFile,
-            schema,
-            ParquetFileWriter.Mode.CREATE,
-            ParquetWriter.DEFAULT_BLOCK_SIZE,
-            0)) {
+            parquetOutputFile, schema, ParquetFileWriter.Mode.CREATE, rowGroupSize, 0)) {
 
       writer.start();
 

@@ -171,59 +171,48 @@ public class DataFileRewriteRunner
         ctx.output(TaskResultAggregator.ERROR_STREAM, ex);
         errorCounter.inc();
       }
-    } else {
-      boolean preserveRowId = TableUtil.supportsRowLineage(value.table());
 
-      try (TaskWriter<RowData> writer = writerFor(value, preserveRowId)) {
-        try (DataIterator<RowData> iterator = readerFor(value, preserveRowId)) {
-          while (iterator.hasNext()) {
-            writer.write(iterator.next());
-          }
+      return;
+    }
 
-          Set<DataFile> dataFiles = Sets.newHashSet(writer.dataFiles());
-          value.group().setOutputFiles(dataFiles);
-          out.collect(
-              new ExecutedGroup(
-                  value.table().currentSnapshot().snapshotId(),
-                  value.groupsPerCommit(),
-                  value.group()));
-          if (LOG.isDebugEnabled()) {
-            LOG.debug(
-                DataFileRewritePlanner.MESSAGE_PREFIX + "Rewritten files {} from {} to {}",
-                tableName,
-                taskName,
-                taskIndex,
-                ctx.timestamp(),
-                value.group().info(),
-                value.group().rewrittenFiles(),
-                value.group().addedFiles());
-          } else {
-            LOG.info(
-                DataFileRewritePlanner.MESSAGE_PREFIX + "Rewritten {} files to {} files",
-                tableName,
-                taskName,
-                taskIndex,
-                ctx.timestamp(),
-                value.group().rewrittenFiles().size(),
-                value.group().addedFiles().size());
-          }
-        } catch (Exception ex) {
-          LOG.info(
-              DataFileRewritePlanner.MESSAGE_PREFIX + "Exception rewriting datafile group {}",
+    boolean preserveRowId = TableUtil.supportsRowLineage(value.table());
+
+    try (TaskWriter<RowData> writer = writerFor(value, preserveRowId)) {
+      try (DataIterator<RowData> iterator = readerFor(value, preserveRowId)) {
+        while (iterator.hasNext()) {
+          writer.write(iterator.next());
+        }
+
+        Set<DataFile> dataFiles = Sets.newHashSet(writer.dataFiles());
+        value.group().setOutputFiles(dataFiles);
+        out.collect(
+            new ExecutedGroup(
+                value.table().currentSnapshot().snapshotId(),
+                value.groupsPerCommit(),
+                value.group()));
+        if (LOG.isDebugEnabled()) {
+          LOG.debug(
+              DataFileRewritePlanner.MESSAGE_PREFIX + "Rewritten files {} from {} to {}",
               tableName,
               taskName,
               taskIndex,
               ctx.timestamp(),
-              value.group(),
-              ex);
-          ctx.output(TaskResultAggregator.ERROR_STREAM, ex);
-          errorCounter.inc();
-          abort(writer, ctx.timestamp());
+              value.group().info(),
+              value.group().rewrittenFiles(),
+              value.group().addedFiles());
+        } else {
+          LOG.info(
+              DataFileRewritePlanner.MESSAGE_PREFIX + "Rewritten {} files to {} files",
+              tableName,
+              taskName,
+              taskIndex,
+              ctx.timestamp(),
+              value.group().rewrittenFiles().size(),
+              value.group().addedFiles().size());
         }
       } catch (Exception ex) {
         LOG.info(
-            DataFileRewritePlanner.MESSAGE_PREFIX
-                + "Exception creating compaction writer for group {}",
+            DataFileRewritePlanner.MESSAGE_PREFIX + "Exception rewriting datafile group {}",
             tableName,
             taskName,
             taskIndex,
@@ -232,12 +221,32 @@ public class DataFileRewriteRunner
             ex);
         ctx.output(TaskResultAggregator.ERROR_STREAM, ex);
         errorCounter.inc();
+        abort(writer, ctx.timestamp());
       }
+    } catch (Exception ex) {
+      LOG.info(
+          DataFileRewritePlanner.MESSAGE_PREFIX
+              + "Exception creating compaction writer for group {}",
+          tableName,
+          taskName,
+          taskIndex,
+          ctx.timestamp(),
+          value.group(),
+          ex);
+      ctx.output(TaskResultAggregator.ERROR_STREAM, ex);
+      errorCounter.inc();
     }
   }
 
   private Set<DataFile> rewriteDataFilesUseParquetMerge(RewriteFileGroup group, Table table)
       throws IOException {
+
+    long rowGroupSize =
+        PropertyUtil.propertyAsLong(
+            table.properties(),
+            TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES,
+            TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES_DEFAULT);
+
     List<List<DataFile>> rewrittenFilesList =
         groupFilesBySizeWithConstraints(
             group.rewrittenFiles(), group.expectedOutputFiles(), group.maxOutputFileSize());
@@ -257,7 +266,7 @@ public class DataFileRewriteRunner
           dataFiles.stream()
               .map(f -> table.io().newInputFile(f.location()))
               .collect(Collectors.toList());
-      ParquetFileMerger.mergeFiles(inputFiles, outputFile, null);
+      ParquetFileMerger.mergeFiles(inputFiles, outputFile, rowGroupSize, null);
       InputFile outputFileInputFile = outputFile.toInputFile();
 
       DataFile resultFile =
