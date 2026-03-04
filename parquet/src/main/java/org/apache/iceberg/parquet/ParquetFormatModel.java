@@ -40,6 +40,7 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.mapping.NameMapping;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.parquet.column.ParquetProperties;
 import org.apache.parquet.schema.MessageType;
 
@@ -47,9 +48,21 @@ public class ParquetFormatModel<D, S, R>
     extends BaseFormatModel<D, S, ParquetValueWriter<?>, R, MessageType> {
   public static final String WRITER_VERSION_KEY = "parquet.writer.version";
   private final boolean isBatchReader;
+  private final DeferredWriterFunction<S> deferredWriterFunction;
+
+  @FunctionalInterface
+  public interface DeferredWriterFunction<S> {
+    ParquetValueWriter<?> wrap(
+        WriterFunction<ParquetValueWriter<?>, S, MessageType> originalWriter,
+        Schema icebergSchema,
+        MessageType parquetType,
+        S engineSchema,
+        Map<String, String> properties);
+  }
 
   public static <D> ParquetFormatModel<PositionDelete<D>, Void, Object> forPositionDeletes() {
-    return new ParquetFormatModel<>(PositionDelete.deleteClass(), Void.class, null, null, false);
+    return new ParquetFormatModel<>(
+        PositionDelete.deleteClass(), Void.class, null, null, false, null);
   }
 
   public static <D, S> ParquetFormatModel<D, S, ParquetValueReader<?>> create(
@@ -57,14 +70,24 @@ public class ParquetFormatModel<D, S, R>
       Class<S> schemaType,
       WriterFunction<ParquetValueWriter<?>, S, MessageType> writerFunction,
       ReaderFunction<ParquetValueReader<?>, S, MessageType> readerFunction) {
-    return new ParquetFormatModel<>(type, schemaType, writerFunction, readerFunction, false);
+    return new ParquetFormatModel<>(type, schemaType, writerFunction, readerFunction, false, null);
+  }
+
+  public static <D, S> ParquetFormatModel<D, S, ParquetValueReader<?>> create(
+      Class<D> type,
+      Class<S> schemaType,
+      WriterFunction<ParquetValueWriter<?>, S, MessageType> writerFunction,
+      ReaderFunction<ParquetValueReader<?>, S, MessageType> readerFunction,
+      DeferredWriterFunction<S> deferredWriterFunction) {
+    return new ParquetFormatModel<>(
+        type, schemaType, writerFunction, readerFunction, false, deferredWriterFunction);
   }
 
   public static <D, S> ParquetFormatModel<D, S, VectorizedReader<?>> create(
       Class<? extends D> type,
       Class<S> schemaType,
       ReaderFunction<VectorizedReader<?>, S, MessageType> batchReaderFunction) {
-    return new ParquetFormatModel<>(type, schemaType, null, batchReaderFunction, true);
+    return new ParquetFormatModel<>(type, schemaType, null, batchReaderFunction, true, null);
   }
 
   private ParquetFormatModel(
@@ -72,9 +95,11 @@ public class ParquetFormatModel<D, S, R>
       Class<S> schemaType,
       WriterFunction<ParquetValueWriter<?>, S, MessageType> writerFunction,
       ReaderFunction<R, S, MessageType> readerFunction,
-      boolean isBatchReader) {
+      boolean isBatchReader,
+      DeferredWriterFunction<S> deferredWriterFunction) {
     super(type, schemaType, writerFunction, readerFunction);
     this.isBatchReader = isBatchReader;
+    this.deferredWriterFunction = deferredWriterFunction;
   }
 
   @Override
@@ -84,7 +109,7 @@ public class ParquetFormatModel<D, S, R>
 
   @Override
   public ModelWriteBuilder<D, S> writeBuilder(EncryptedOutputFile outputFile) {
-    return new WriteBuilderWrapper<>(outputFile, writerFunction());
+    return new WriteBuilderWrapper<>(outputFile, writerFunction(), deferredWriterFunction);
   }
 
   @Override
@@ -95,15 +120,19 @@ public class ParquetFormatModel<D, S, R>
   private static class WriteBuilderWrapper<D, S> implements ModelWriteBuilder<D, S> {
     private final Parquet.WriteBuilder internal;
     private final WriterFunction<ParquetValueWriter<?>, S, MessageType> writerFunction;
+    private final Map<String, String> properties = Maps.newHashMap();
+    private final DeferredWriterFunction<S> deferredWriterFunction;
     private Schema schema;
     private S engineSchema;
     private FileContent content;
 
     private WriteBuilderWrapper(
         EncryptedOutputFile outputFile,
-        WriterFunction<ParquetValueWriter<?>, S, MessageType> writerFunction) {
+        WriterFunction<ParquetValueWriter<?>, S, MessageType> writerFunction,
+        DeferredWriterFunction<S> deferredWriterFunction) {
       this.internal = Parquet.write(outputFile);
       this.writerFunction = writerFunction;
+      this.deferredWriterFunction = deferredWriterFunction;
     }
 
     @Override
@@ -126,12 +155,14 @@ public class ParquetFormatModel<D, S, R>
       }
 
       internal.set(property, value);
+      properties.put(property, value);
       return this;
     }
 
     @Override
-    public ModelWriteBuilder<D, S> setAll(Map<String, String> properties) {
-      internal.setAll(properties);
+    public ModelWriteBuilder<D, S> setAll(Map<String, String> newProperties) {
+      internal.setAll(newProperties);
+      this.properties.putAll(newProperties);
       return this;
     }
 
@@ -142,8 +173,8 @@ public class ParquetFormatModel<D, S, R>
     }
 
     @Override
-    public ModelWriteBuilder<D, S> meta(Map<String, String> properties) {
-      internal.meta(properties);
+    public ModelWriteBuilder<D, S> meta(Map<String, String> newProperties) {
+      internal.meta(newProperties);
       return this;
     }
 
@@ -183,8 +214,17 @@ public class ParquetFormatModel<D, S, R>
         case DATA:
           internal.createContextFunc(Parquet.WriteBuilder.Context::dataContext);
           internal.createWriterFunc(
-              (icebergSchema, messageType) ->
-                  writerFunction.write(icebergSchema, messageType, engineSchema));
+              (icebergSchema, messageType) -> {
+                ParquetValueWriter<?> writer =
+                    writerFunction.write(icebergSchema, messageType, engineSchema);
+                if (deferredWriterFunction != null) {
+                  return deferredWriterFunction.wrap(
+                      writerFunction, icebergSchema, messageType, engineSchema, properties);
+                }
+
+                return writer;
+              });
+
           break;
         case EQUALITY_DELETES:
           internal.createContextFunc(Parquet.WriteBuilder.Context::deleteContext);

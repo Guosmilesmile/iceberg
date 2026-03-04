@@ -50,7 +50,15 @@ public class SparkFormatModels {
             StructType.class,
             SparkParquetWriters::buildWriter,
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
-                SparkParquetReaders.buildReader(icebergSchema, fileSchema, idToConstant)));
+                SparkParquetReaders.buildReader(icebergSchema, fileSchema, idToConstant),
+            (originalWriter, icebergSchema, parquetType, engineSchema, properties) -> {
+              if (SparkDeferredParquetWriter.shouldUseVariantShredding(properties, icebergSchema)) {
+                return SparkDeferredParquetWriter.forVariantShredding(
+                    engineSchema, parquetType, properties);
+              }
+
+              return originalWriter.write(icebergSchema, parquetType, engineSchema);
+            }));
 
     FormatModelRegistry.register(
         ParquetFormatModel.create(

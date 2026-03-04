@@ -34,7 +34,15 @@ public class FlinkFormatModels {
             (icebergSchema, fileSchema, engineSchema) ->
                 FlinkParquetWriters.buildWriter(engineSchema, fileSchema),
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
-                FlinkParquetReaders.buildReader(icebergSchema, fileSchema, idToConstant)));
+                FlinkParquetReaders.buildReader(icebergSchema, fileSchema, idToConstant),
+            (originalWriter, icebergSchema, parquetType, engineSchema, properties) -> {
+              if (FlinkDeferredParquetWriter.shouldUseVariantShredding(properties, icebergSchema)) {
+                return FlinkDeferredParquetWriter.forVariantShredding(
+                    engineSchema, parquetType, properties);
+              }
+
+              return originalWriter.write(icebergSchema, parquetType, engineSchema);
+            }));
 
     FormatModelRegistry.register(
         AvroFormatModel.create(
