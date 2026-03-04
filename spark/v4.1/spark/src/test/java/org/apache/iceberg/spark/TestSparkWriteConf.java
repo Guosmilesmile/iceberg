@@ -41,6 +41,7 @@ import static org.apache.iceberg.TableProperties.WRITE_DISTRIBUTION_MODE_NONE;
 import static org.apache.iceberg.TableProperties.WRITE_DISTRIBUTION_MODE_RANGE;
 import static org.apache.iceberg.spark.SparkSQLProperties.COMPRESSION_CODEC;
 import static org.apache.iceberg.spark.SparkSQLProperties.COMPRESSION_LEVEL;
+import static org.apache.iceberg.spark.SparkSQLProperties.SHRED_VARIANTS;
 import static org.apache.spark.sql.connector.write.RowLevelOperation.Command.DELETE;
 import static org.apache.spark.sql.connector.write.RowLevelOperation.Command.MERGE;
 import static org.apache.spark.sql.connector.write.RowLevelOperation.Command.UPDATE;
@@ -345,6 +346,8 @@ public class TestSparkWriteConf extends TestBaseWithCatalog {
                     TableProperties.DELETE_PARQUET_COMPRESSION,
                     "snappy"),
                 ImmutableMap.of(
+                    SHRED_VARIANTS,
+                    "false",
                     DELETE_PARQUET_COMPRESSION,
                     "zstd",
                     PARQUET_COMPRESSION,
@@ -467,6 +470,8 @@ public class TestSparkWriteConf extends TestBaseWithCatalog {
                     PARQUET_COMPRESSION_LEVEL,
                     "5"),
                 ImmutableMap.of(
+                    SHRED_VARIANTS,
+                    "false",
                     DELETE_PARQUET_COMPRESSION,
                     "zstd",
                     PARQUET_COMPRESSION,
@@ -538,6 +543,8 @@ public class TestSparkWriteConf extends TestBaseWithCatalog {
                     DELETE_PARQUET_COMPRESSION_LEVEL,
                     "6"),
                 ImmutableMap.of(
+                    SHRED_VARIANTS,
+                    "false",
                     DELETE_PARQUET_COMPRESSION,
                     "zstd",
                     PARQUET_COMPRESSION,
