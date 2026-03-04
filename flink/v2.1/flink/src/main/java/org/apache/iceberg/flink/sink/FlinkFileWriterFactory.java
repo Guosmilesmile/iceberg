@@ -22,21 +22,48 @@ import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT;
 import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT_DEFAULT;
 import static org.apache.iceberg.TableProperties.DELETE_DEFAULT_FILE_FORMAT;
 
+import java.io.IOException;
 import java.io.Serializable;
+import java.io.UncheckedIOException;
+import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.MetricsConfig;
+import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SortOrder;
+import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.RegistryBasedFileWriterFactory;
+import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.flink.FlinkSchemaUtil;
+import org.apache.iceberg.flink.FlinkWriteOptions;
+import org.apache.iceberg.flink.data.FlinkParquetWriters;
+import org.apache.iceberg.flink.data.FlinkSchemaInferenceVisitor;
+import org.apache.iceberg.flink.data.ParquetWithFlinkSchemaVisitor;
+import org.apache.iceberg.io.BufferedFileAppender;
+import org.apache.iceberg.io.DataWriter;
+import org.apache.iceberg.io.FileAppender;
+import org.apache.iceberg.parquet.Parquet;
+import org.apache.iceberg.parquet.ParquetSchemaUtil;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.types.Types;
+import org.apache.parquet.schema.MessageType;
 
 public class FlinkFileWriterFactory extends RegistryBasedFileWriterFactory<RowData, RowType>
     implements Serializable {
+  private final FileFormat dataFileFormat;
+  private final Map<String, String> writeProperties;
+  private final Schema dataSchema;
+  private final Table table;
+  private final RowType dataFlinkType;
+  private final SortOrder dataSortOrder;
+
   FlinkFileWriterFactory(
       Table table,
       FileFormat dataFileFormat,
@@ -63,6 +90,78 @@ public class FlinkFileWriterFactory extends RegistryBasedFileWriterFactory<RowDa
         writeProperties,
         dataFlinkType == null ? FlinkSchemaUtil.convert(dataSchema) : dataFlinkType,
         equalityDeleteInputSchema(equalityDeleteFlinkType, equalityDeleteRowSchema));
+    this.dataFileFormat = dataFileFormat;
+    this.writeProperties = writeProperties;
+    this.dataSchema = dataSchema;
+    this.table = table;
+    this.dataFlinkType = dataFlinkType;
+    this.dataSortOrder = dataSortOrder;
+  }
+
+  @Override
+  public DataWriter<RowData> newDataWriter(
+      EncryptedOutputFile file, PartitionSpec spec, StructLike partition) {
+    if (!shouldUseVariantShredding()) {
+      return super.newDataWriter(file, spec, partition);
+    }
+
+    int bufferSize =
+        Integer.parseInt(
+            writeProperties.getOrDefault(
+                FlinkWriteOptions.VARIANT_INFERENCE_BUFFER_SIZE.key(),
+                String.valueOf(FlinkWriteOptions.VARIANT_INFERENCE_BUFFER_SIZE.defaultValue())));
+
+    Map<String, String> tableProperties = table != null ? table.properties() : ImmutableMap.of();
+    MetricsConfig metricsConfig =
+        table != null ? MetricsConfig.forTable(table) : MetricsConfig.getDefault();
+
+    Function<List<RowData>, FileAppender<RowData>> appenderFactory =
+        bufferedRows -> {
+          Preconditions.checkNotNull(bufferedRows, "bufferedRows must not be null");
+          MessageType originalSchema = ParquetSchemaUtil.convert(dataSchema, "table");
+
+          MessageType shreddedSchema =
+              (MessageType)
+                  ParquetWithFlinkSchemaVisitor.visit(
+                      dataFlinkType,
+                      originalSchema,
+                      new FlinkSchemaInferenceVisitor(bufferedRows, dataFlinkType));
+
+          try {
+            FileAppender<RowData> appender =
+                Parquet.write(file)
+                    .schema(dataSchema)
+                    .withFileSchema(shreddedSchema)
+                    .createWriterFunc(
+                        msgType -> FlinkParquetWriters.buildWriter(dataFlinkType, msgType))
+                    .setAll(tableProperties)
+                    .setAll(writeProperties)
+                    .metricsConfig(metricsConfig)
+                    .overwrite()
+                    .build();
+
+            for (RowData row : bufferedRows) {
+              appender.add(row);
+            }
+
+            return appender;
+          } catch (IOException e) {
+            throw new UncheckedIOException("Failed to create shredded variant writer", e);
+          }
+        };
+
+    RowDataSerializer serializer = new RowDataSerializer(dataFlinkType);
+    BufferedFileAppender<RowData> bufferedAppender =
+        new BufferedFileAppender<>(bufferSize, appenderFactory, serializer::copy);
+
+    return new DataWriter<>(
+        bufferedAppender,
+        dataFileFormat,
+        file.encryptingOutputFile().location(),
+        spec,
+        partition,
+        file.keyMetadata(),
+        dataSortOrder);
   }
 
   private static RowType equalityDeleteInputSchema(RowType rowType, Schema rowSchema) {
@@ -187,5 +286,20 @@ public class FlinkFileWriterFactory extends RegistryBasedFileWriterFactory<RowDa
           equalityDeleteSortOrder,
           writerProperties);
     }
+  }
+
+  private boolean shouldUseVariantShredding() {
+    // Variant shredding is currently only supported for Parquet files
+    if (dataFileFormat != FileFormat.PARQUET) {
+      return false;
+    }
+
+    boolean shreddingEnabled =
+        Boolean.parseBoolean(writeProperties.get(FlinkWriteOptions.SHRED_VARIANTS.key()));
+
+    return shreddingEnabled
+        && dataSchema != null
+        && dataSchema.columns().stream()
+            .anyMatch(field -> field.type() instanceof Types.VariantType);
   }
 }
