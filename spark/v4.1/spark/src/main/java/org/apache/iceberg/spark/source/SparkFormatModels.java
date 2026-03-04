@@ -40,7 +40,8 @@ public class SparkFormatModels {
         AvroFormatModel.create(
             InternalRow.class,
             StructType.class,
-            (icebergSchema, fileSchema, engineSchema) -> new SparkAvroWriter(engineSchema),
+            (icebergSchema, fileSchema, engineSchema, properties) ->
+                new SparkAvroWriter(engineSchema),
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
                 SparkPlannedAvroReader.create(icebergSchema, idToConstant)));
 
@@ -48,7 +49,8 @@ public class SparkFormatModels {
         ParquetFormatModel.create(
             InternalRow.class,
             StructType.class,
-            SparkParquetWriters::buildWriter,
+            (icebergSchema, fileSchema, engineSchema, idToConstant) ->
+                SparkParquetWriters.buildWriter(icebergSchema, fileSchema, engineSchema),
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
                 SparkParquetReaders.buildReader(icebergSchema, fileSchema, idToConstant)));
 
@@ -72,7 +74,7 @@ public class SparkFormatModels {
         ORCFormatModel.create(
             InternalRow.class,
             StructType.class,
-            (icebergSchema, fileSchema, engineSchema) ->
+            (icebergSchema, fileSchema, engineSchema, properties) ->
                 new SparkOrcWriter(icebergSchema, fileSchema),
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
                 new SparkOrcReader(icebergSchema, fileSchema, idToConstant)));

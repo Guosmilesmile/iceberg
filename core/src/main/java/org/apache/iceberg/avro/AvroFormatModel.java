@@ -39,6 +39,7 @@ import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 
 public class AvroFormatModel<D, S>
     extends BaseFormatModel<D, S, DatumWriter<D>, DatumReader<D>, Schema> {
@@ -81,6 +82,7 @@ public class AvroFormatModel<D, S>
   private static class WriteBuilderWrapper<D, S> implements ModelWriteBuilder<D, S> {
     private final Avro.WriteBuilder internal;
     private final WriterFunction<DatumWriter<D>, S, Schema> writerFunction;
+    private final Map<String, String> properties = Maps.newHashMap();
     private org.apache.iceberg.Schema schema;
     private S engineSchema;
     private FileContent content;
@@ -107,12 +109,14 @@ public class AvroFormatModel<D, S>
     @Override
     public ModelWriteBuilder<D, S> set(String property, String value) {
       internal.set(property, value);
+      properties.put(property, value);
       return this;
     }
 
     @Override
     public ModelWriteBuilder<D, S> setAll(Map<String, String> properties) {
       internal.setAll(properties);
+      this.properties.putAll(properties);
       return this;
     }
 
@@ -162,12 +166,12 @@ public class AvroFormatModel<D, S>
         case DATA:
           internal.createContextFunc(Avro.WriteBuilder.Context::dataContext);
           internal.createWriterFunc(
-              avroSchema -> writerFunction.write(schema, avroSchema, engineSchema));
+              avroSchema -> writerFunction.write(schema, avroSchema, engineSchema, properties));
           break;
         case EQUALITY_DELETES:
           internal.createContextFunc(Avro.WriteBuilder.Context::deleteContext);
           internal.createWriterFunc(
-              avroSchema -> writerFunction.write(schema, avroSchema, engineSchema));
+              avroSchema -> writerFunction.write(schema, avroSchema, engineSchema, properties));
           break;
         case POSITION_DELETES:
           Preconditions.checkState(

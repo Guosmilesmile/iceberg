@@ -40,6 +40,7 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.mapping.NameMapping;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.parquet.column.ParquetProperties;
 import org.apache.parquet.schema.MessageType;
 
@@ -95,6 +96,7 @@ public class ParquetFormatModel<D, S, R>
   private static class WriteBuilderWrapper<D, S> implements ModelWriteBuilder<D, S> {
     private final Parquet.WriteBuilder internal;
     private final WriterFunction<ParquetValueWriter<?>, S, MessageType> writerFunction;
+    private final Map<String, String> properties = Maps.newHashMap();
     private Schema schema;
     private S engineSchema;
     private FileContent content;
@@ -126,12 +128,14 @@ public class ParquetFormatModel<D, S, R>
       }
 
       internal.set(property, value);
+      properties.put(property, value);
       return this;
     }
 
     @Override
     public ModelWriteBuilder<D, S> setAll(Map<String, String> properties) {
       internal.setAll(properties);
+      this.properties.putAll(properties);
       return this;
     }
 
@@ -184,13 +188,13 @@ public class ParquetFormatModel<D, S, R>
           internal.createContextFunc(Parquet.WriteBuilder.Context::dataContext);
           internal.createWriterFunc(
               (icebergSchema, messageType) ->
-                  writerFunction.write(icebergSchema, messageType, engineSchema));
+                  writerFunction.write(icebergSchema, messageType, engineSchema, properties));
           break;
         case EQUALITY_DELETES:
           internal.createContextFunc(Parquet.WriteBuilder.Context::deleteContext);
           internal.createWriterFunc(
               (icebergSchema, messageType) ->
-                  writerFunction.write(icebergSchema, messageType, engineSchema));
+                  writerFunction.write(icebergSchema, messageType, engineSchema, properties));
           break;
         case POSITION_DELETES:
           Preconditions.checkState(

@@ -35,7 +35,7 @@ public class GenericFormatModels {
         AvroFormatModel.create(
             Record.class,
             Void.class,
-            (icebergSchema, fileSchema, engineSchema) -> DataWriter.create(fileSchema),
+            (icebergSchema, fileSchema, engineSchema, properties) -> DataWriter.create(fileSchema),
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
                 PlannedDataReader.create(icebergSchema, idToConstant)));
 
@@ -45,7 +45,7 @@ public class GenericFormatModels {
         ParquetFormatModel.create(
             Record.class,
             Void.class,
-            (icebergSchema, fileSchema, engineSchema) ->
+            (icebergSchema, fileSchema, engineSchema, properties) ->
                 GenericParquetWriter.create(icebergSchema, fileSchema),
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
                 GenericParquetReaders.buildReader(icebergSchema, fileSchema, idToConstant)));
@@ -56,7 +56,7 @@ public class GenericFormatModels {
         ORCFormatModel.create(
             Record.class,
             Void.class,
-            (icebergSchema, fileSchema, engineSchema) ->
+            (icebergSchema, fileSchema, engineSchema, properties) ->
                 GenericOrcWriter.buildWriter(icebergSchema, fileSchema),
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
                 GenericOrcReader.buildReader(icebergSchema, fileSchema, idToConstant)));

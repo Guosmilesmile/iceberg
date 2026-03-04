@@ -31,8 +31,10 @@ public class FlinkFormatModels {
         ParquetFormatModel.create(
             RowData.class,
             RowType.class,
-            (icebergSchema, fileSchema, engineSchema) ->
-                FlinkParquetWriters.buildWriter(engineSchema, fileSchema),
+            (icebergSchema, fileSchema, engineSchema, properties) ->
+                FlinkDeferredParquetWriter.shouldUseVariantShredding(properties, icebergSchema)
+                    ? FlinkDeferredParquetWriter.forVariantShredding(engineSchema, fileSchema)
+                    : FlinkParquetWriters.buildWriter(engineSchema, fileSchema),
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
                 FlinkParquetReaders.buildReader(icebergSchema, fileSchema, idToConstant)));
 
@@ -40,7 +42,8 @@ public class FlinkFormatModels {
         AvroFormatModel.create(
             RowData.class,
             RowType.class,
-            (icebergSchema, fileSchema, engineSchema) -> new FlinkAvroWriter(engineSchema),
+            (icebergSchema, fileSchema, engineSchema, properties) ->
+                new FlinkAvroWriter(engineSchema),
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
                 FlinkPlannedAvroReader.create(icebergSchema, idToConstant)));
 
@@ -48,7 +51,7 @@ public class FlinkFormatModels {
         ORCFormatModel.create(
             RowData.class,
             RowType.class,
-            (icebergSchema, fileSchema, engineSchema) ->
+            (icebergSchema, fileSchema, engineSchema, properties) ->
                 FlinkOrcWriter.buildWriter(engineSchema, icebergSchema),
             (icebergSchema, fileSchema, engineSchema, idToConstant) ->
                 new FlinkOrcReader(icebergSchema, fileSchema, idToConstant)));

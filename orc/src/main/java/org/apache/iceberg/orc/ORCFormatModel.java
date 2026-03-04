@@ -39,6 +39,7 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.mapping.NameMapping;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.orc.TypeDescription;
 
 public class ORCFormatModel<D, S, R>
@@ -92,6 +93,7 @@ public class ORCFormatModel<D, S, R>
   private static class WriteBuilderWrapper<D, S> implements ModelWriteBuilder<D, S> {
     private final ORC.WriteBuilder internal;
     private final WriterFunction<OrcRowWriter<?>, S, TypeDescription> writerFunction;
+    private final Map<String, String> properties = Maps.newHashMap();
     private Schema schema;
     private S engineSchema;
 
@@ -120,12 +122,14 @@ public class ORCFormatModel<D, S, R>
     @Override
     public ModelWriteBuilder<D, S> set(String property, String value) {
       internal.set(property, value);
+      properties.put(property, value);
       return this;
     }
 
     @Override
     public ModelWriteBuilder<D, S> setAll(Map<String, String> properties) {
       internal.setAll(properties);
+      this.properties.putAll(properties);
       return this;
     }
 
@@ -172,13 +176,13 @@ public class ORCFormatModel<D, S, R>
           internal.createContextFunc(ORC.WriteBuilder.Context::dataContext);
           internal.createWriterFunc(
               (icebergSchema, typeDescription) ->
-                  writerFunction.write(icebergSchema, typeDescription, engineSchema));
+                  writerFunction.write(icebergSchema, typeDescription, engineSchema, properties));
           break;
         case EQUALITY_DELETES:
           internal.createContextFunc(ORC.WriteBuilder.Context::deleteContext);
           internal.createWriterFunc(
               (icebergSchema, typeDescription) ->
-                  writerFunction.write(icebergSchema, typeDescription, engineSchema));
+                  writerFunction.write(icebergSchema, typeDescription, engineSchema, properties));
           break;
         case POSITION_DELETES:
           Preconditions.checkState(

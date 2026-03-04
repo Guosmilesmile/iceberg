@@ -104,7 +104,7 @@ public abstract class BaseFormatModel<D, S, W, R, F> implements FormatModel<D, S
      * @param engineSchema the engine-specific schema for the input data (optional)
      * @return a writer configured for the given schemas
      */
-    W write(Schema icebergSchema, F fileSchema, S engineSchema);
+    W write(Schema icebergSchema, F fileSchema, S engineSchema, Map<String, String> properties);
   }
 
   /**
