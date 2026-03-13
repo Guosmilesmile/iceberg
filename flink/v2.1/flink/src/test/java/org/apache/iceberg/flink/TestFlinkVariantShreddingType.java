@@ -384,7 +384,9 @@ class TestFlinkVariantShreddingType extends CatalogTestBase {
         field(
             "value",
             shreddedPrimitive(
-                PrimitiveType.PrimitiveTypeName.INT64, LogicalTypeAnnotation.decimalType(6, 21)));
+                PrimitiveType.PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY,
+                16,
+                LogicalTypeAnnotation.decimalType(6, 21)));
     GroupType address = variant("data", 2, Type.Repetition.REQUIRED, objectFields(value));
     MessageType expectedSchema = parquetSchema(address);
 
@@ -450,6 +452,11 @@ class TestFlinkVariantShreddingType extends CatalogTestBase {
   private static Type shreddedPrimitive(
       PrimitiveType.PrimitiveTypeName primitive, LogicalTypeAnnotation annotation) {
     return optional(primitive).as(annotation).named("typed_value");
+  }
+
+  private static Type shreddedPrimitive(
+      PrimitiveType.PrimitiveTypeName primitive, int length, LogicalTypeAnnotation annotation) {
+    return optional(primitive).length(length).as(annotation).named("typed_value");
   }
 
   private static GroupType objectFields(GroupType... fields) {
