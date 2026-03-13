@@ -573,7 +573,7 @@ public class TestVariantShredding extends CatalogTestBase {
         field(
             "value",
             shreddedPrimitive(
-                PrimitiveType.PrimitiveTypeName.INT64, LogicalTypeAnnotation.decimalType(6, 18)));
+                PrimitiveType.PrimitiveTypeName.INT64, LogicalTypeAnnotation.decimalType(6, 21)));
     GroupType address = variant("address", 2, Type.Repetition.REQUIRED, objectFields(value));
     MessageType expectedSchema = parquetSchema(address);
 
