@@ -19,13 +19,17 @@
 package org.apache.iceberg.flink.data;
 
 import java.util.List;
+import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
+import org.apache.iceberg.PartitionData;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.data.BaseFormatModelTests;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.flink.FlinkSchemaUtil;
 import org.apache.iceberg.flink.RowDataConverter;
 import org.apache.iceberg.flink.TestHelpers;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.types.Types;
 
 public class TestFlinkFormatModel extends BaseFormatModelTests<RowData> {
 
@@ -47,5 +51,26 @@ public class TestFlinkFormatModel extends BaseFormatModelTests<RowData> {
   @Override
   protected void assertEquals(Schema schema, List<RowData> expected, List<RowData> actual) {
     TestHelpers.assertRows(actual, expected, FlinkSchemaUtil.convert(schema));
+  }
+
+  @Override
+  protected Object convertConstantToEngine(Types.NestedField field, Object value) {
+    return RowDataUtil.convertConstant(field.type(), value);
+  }
+
+  @Override
+  protected <D> List<D> convertToPartitionIdentity(
+      List<RowData> actual, int index, Class<D> clazz) {
+    List<D> partitionIdentity = Lists.newArrayList();
+    for (RowData row : actual) {
+      Object object = ((GenericRowData) row).getField(0);
+      if (object instanceof PartitionData partition) {
+        partitionIdentity.add(partition.get(index, clazz));
+      } else {
+        throw new IllegalArgumentException("Not a partition data");
+      }
+    }
+
+    return partitionIdentity;
   }
 }

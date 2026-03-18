@@ -24,8 +24,13 @@ import java.util.List;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.data.BaseFormatModelTests;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.spark.SparkSchemaUtil;
+import org.apache.iceberg.spark.SparkUtil;
+import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.unsafe.types.UTF8String;
 
 public class TestSparkFormatModel extends BaseFormatModelTests<InternalRow> {
 
@@ -50,5 +55,28 @@ public class TestSparkFormatModel extends BaseFormatModelTests<InternalRow> {
     for (int i = 0; i < expected.size(); i++) {
       TestHelpers.assertEquals(schema, expected.get(i), actual.get(i));
     }
+  }
+
+  @Override
+  protected Object convertConstantToEngine(Types.NestedField field, Object value) {
+    return SparkUtil.internalToSpark(field.type(), value);
+  }
+
+  @Override
+  protected <D> List<D> convertToPartitionIdentity(
+      List<InternalRow> actual, int index, Class<D> clazz) {
+    List<D> partitionIdentity = Lists.newArrayList();
+    for (InternalRow row : actual) {
+      GenericInternalRow genericInternalRow =
+          (GenericInternalRow) ((GenericInternalRow) row).genericGet(0);
+      Object value = genericInternalRow.genericGet(index);
+      if (clazz == String.class && value instanceof UTF8String) {
+        partitionIdentity.add(clazz.cast(value.toString()));
+      } else {
+        partitionIdentity.add(clazz.cast(value));
+      }
+    }
+
+    return partitionIdentity;
   }
 }
