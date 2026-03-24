@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.IntStream;
+import org.apache.hadoop.util.Lists;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileFormat;
@@ -796,6 +797,97 @@ public abstract class BaseFormatModelTests<T> {
 
   @ParameterizedTest
   @FieldSource("FILE_FORMATS")
+  void testReadMetadataColumnRowLinageExistValue(FileFormat fileFormat) throws IOException {
+    assumeSupports(fileFormat, FEATURE_META_ROW_LINEAGE);
+
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema dataSchema = dataGenerator.schema();
+
+    Schema writeSchema = MetadataColumns.schemaWithRowLineage(dataSchema);
+
+    List<Record> baseRecords = dataGenerator.generateRecords();
+    List<Record> writeRecords = Lists.newArrayListWithExpectedSize(baseRecords.size());
+    for (int i = 0; i < baseRecords.size(); i++) {
+      Record base = baseRecords.get(i);
+      Record rec = GenericRecord.create(writeSchema);
+      for (Types.NestedField col : dataSchema.columns()) {
+        rec.setField(col.name(), base.getField(col.name()));
+      }
+
+      if (i % 2 == 0) {
+        rec.setField(MetadataColumns.ROW_ID.name(), 555L + i);
+        rec.setField(MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.name(), 7L);
+      } else {
+        rec.setField(MetadataColumns.ROW_ID.name(), null);
+        rec.setField(MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.name(), null);
+      }
+
+      writeRecords.add(rec);
+    }
+
+    DataWriter<Record> writer =
+        FormatModelRegistry.dataWriteBuilder(fileFormat, Record.class, encryptedFile)
+            .schema(writeSchema)
+            .spec(PartitionSpec.unpartitioned())
+            .build();
+
+    try (writer) {
+      writeRecords.forEach(writer::write);
+    }
+
+    long baseRowId = 100L;
+    long fileSeqNumber = 5L;
+    Schema projectionSchema =
+        new Schema(MetadataColumns.ROW_ID, MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER);
+
+    Map<Integer, Object> idToConstant =
+        ImmutableMap.of(
+            MetadataColumns.ROW_ID.fieldId(), baseRowId,
+            MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.fieldId(), fileSeqNumber);
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(projectionSchema)
+            .engineProjection(engineSchema(projectionSchema))
+            .idToConstant(convertConstantsToEngine(projectionSchema, idToConstant))
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    // Expected results:
+    // - Even rows (explicit values): _row_id = 555+i, _last_updated_sequence_number = 7
+    // - Odd rows (null values): _row_id = baseRowId+pos, _last_updated_sequence_number =
+    // fileSeqNumber
+    List<Record> expected =
+        IntStream.range(0, baseRecords.size())
+            .mapToObj(
+                i -> {
+                  if (i % 2 == 0) {
+                    return GenericRecord.create(projectionSchema)
+                        .copy(
+                            MetadataColumns.ROW_ID.name(),
+                            555L + i,
+                            MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.name(),
+                            7L);
+                  } else {
+                    return GenericRecord.create(projectionSchema)
+                        .copy(
+                            MetadataColumns.ROW_ID.name(),
+                            baseRowId + i,
+                            MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.name(),
+                            fileSeqNumber);
+                  }
+                })
+            .toList();
+
+    assertThat(readRecords).hasSize(baseRecords.size());
+    assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
+  }
+
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
   void testReadMetadataColumnPartitionIdentity(FileFormat fileFormat) throws IOException {
 
     DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
@@ -808,8 +900,7 @@ public abstract class BaseFormatModelTests<T> {
     DataWriter<Record> writer =
         FormatModelRegistry.dataWriteBuilder(fileFormat, Record.class, encryptedFile)
             .schema(dataGenerator.schema())
-            .spec(spec)
-            .partition(partitionData)
+            .spec(PartitionSpec.unpartitioned())
             .build();
 
     List<Record> records = dataGenerator.generateRecords();
@@ -1124,17 +1215,5 @@ public abstract class BaseFormatModelTests<T> {
                 entry ->
                     convertConstantToEngine(
                         projectionSchema.findField(entry.getKey()), entry.getValue())));
-  }
-
-  private Record partitionDataToRecord(
-      Types.StructType partitionType, PartitionData partitionData) {
-    Record record = GenericRecord.create(partitionType);
-    List<Types.NestedField> fields = partitionType.fields();
-    for (int i = 0; i < fields.size(); i++) {
-      Types.NestedField field = fields.get(i);
-      record.setField(field.name(), partitionData.get(i, field.type().typeId().javaClass()));
-    }
-
-    return record;
   }
 }
