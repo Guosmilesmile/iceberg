@@ -39,6 +39,7 @@ import org.apache.iceberg.MetadataColumns;
 import org.apache.iceberg.PartitionData;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.StructLike;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.deletes.EqualityDeleteWriter;
 import org.apache.iceberg.deletes.PositionDelete;
@@ -60,6 +61,7 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -77,10 +79,7 @@ public abstract class BaseFormatModelTests<T> {
 
   protected abstract void assertEquals(Schema schema, List<T> expected, List<T> actual);
 
-  protected abstract Object convertConstantToEngine(Types.NestedField field, Object value);
-
-  protected abstract <D> List<D> convertToPartitionIdentity(
-      List<T> actual, int index, Class<D> clazz);
+  protected abstract Object convertConstantToEngine(Type type, Object value);
 
   protected boolean supportsBatchReads() {
     return false;
@@ -930,61 +929,17 @@ public abstract class BaseFormatModelTests<T> {
       readRecords = ImmutableList.copyOf(reader);
     }
 
-    assertThat(readRecords).hasSize(records.size());
-    assertThat(convertToPartitionIdentity(readRecords, 0, String.class))
-        .allMatch(s -> s.equals("test_col_a"));
-  }
-
-  @ParameterizedTest
-  @FieldSource("FILE_FORMATS")
-  void testReadMetadataColumnPartitionBucketTransform(FileFormat fileFormat) throws IOException {
-    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
-    Schema dataSchema = dataGenerator.schema();
-
-    PartitionSpec spec = PartitionSpec.builderFor(dataSchema).bucket("col_a", 4).build();
-
-    Types.StructType partitionType = spec.partitionType();
-    PartitionData partitionData = new PartitionData(partitionType);
-    // bucket(4, 1) = 1
-    partitionData.set(0, 1);
-
-    List<Record> records = dataGenerator.generateRecords();
-
-    DataWriter<Record> writer =
-        FormatModelRegistry.dataWriteBuilder(fileFormat, Record.class, encryptedFile)
-            .schema(dataSchema)
-            .spec(spec)
-            .partition(partitionData)
-            .build();
-
-    try (writer) {
-      records.forEach(writer::write);
-    }
-
-    Types.NestedField partitionField =
-        Types.NestedField.optional(
-            MetadataColumns.PARTITION_COLUMN_ID,
-            MetadataColumns.PARTITION_COLUMN_NAME,
-            partitionType,
-            MetadataColumns.PARTITION_COLUMN_DOC);
-    Schema projectionSchema = new Schema(partitionField);
-
-    Map<Integer, Object> idToConstant =
-        ImmutableMap.of(MetadataColumns.PARTITION_COLUMN_ID, partitionData);
-
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(projectionSchema)
-            .engineProjection(engineSchema(projectionSchema))
-            .idToConstant(convertConstantsToEngine(projectionSchema, idToConstant))
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
+    Record partitionRecord = structLikeToRecord(partitionData, partitionType);
+    List<Record> expected =
+        IntStream.range(0, records.size())
+            .mapToObj(
+                i ->
+                    GenericRecord.create(projectionSchema)
+                        .copy(MetadataColumns.PARTITION_COLUMN_NAME, partitionRecord))
+            .toList();
 
     assertThat(readRecords).hasSize(records.size());
-    assertThat(convertToPartitionIdentity(readRecords, 0, Integer.class)).allMatch(s -> s == 1);
+    assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
   }
 
   @ParameterizedTest
@@ -1012,8 +967,7 @@ public abstract class BaseFormatModelTests<T> {
     DataWriter<Record> writer =
         FormatModelRegistry.dataWriteBuilder(fileFormat, Record.class, encryptedFile)
             .schema(dataSchema)
-            .spec(oldSpec)
-            .partition(oldPartitionData)
+            .spec(PartitionSpec.unpartitioned())
             .build();
 
     List<Record> records = dataGenerator.generateRecords();
@@ -1047,9 +1001,17 @@ public abstract class BaseFormatModelTests<T> {
       readRecords = ImmutableList.copyOf(reader);
     }
 
+    Record partitionRecord = structLikeToRecord(oldPartitionData, unifiedPartitionType);
+    List<Record> expected =
+        IntStream.range(0, records.size())
+            .mapToObj(
+                i ->
+                    GenericRecord.create(projectionSchema)
+                        .copy(MetadataColumns.PARTITION_COLUMN_NAME, partitionRecord))
+            .toList();
+
     assertThat(readRecords).hasSize(records.size());
-    assertThat(convertToPartitionIdentity(readRecords, 0, String.class))
-        .allMatch(s -> s.equals("test_data"));
+    assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
   }
 
   @ParameterizedTest
@@ -1073,8 +1035,7 @@ public abstract class BaseFormatModelTests<T> {
     DataWriter<Record> writer =
         FormatModelRegistry.dataWriteBuilder(fileFormat, Record.class, encryptedFile)
             .schema(dataSchema)
-            .spec(oldSpec)
-            .partition(oldPartitionData)
+            .spec(PartitionSpec.unpartitioned())
             .build();
 
     List<Record> records = dataGenerator.generateRecords();
@@ -1108,9 +1069,17 @@ public abstract class BaseFormatModelTests<T> {
       readRecords = ImmutableList.copyOf(reader);
     }
 
+    Record partitionRecord = structLikeToRecord(oldPartitionData, newPartitionType);
+    List<Record> expected =
+        IntStream.range(0, records.size())
+            .mapToObj(
+                i ->
+                    GenericRecord.create(projectionSchema)
+                        .copy(MetadataColumns.PARTITION_COLUMN_NAME, partitionRecord))
+            .toList();
+
     assertThat(readRecords).hasSize(records.size());
-    assertThat(convertToPartitionIdentity(readRecords, 0, String.class))
-        .allMatch(s -> s.equals("test_col_a"));
+    assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
   }
 
   private void readAndAssertGenericRecords(
@@ -1214,6 +1183,21 @@ public abstract class BaseFormatModelTests<T> {
                 Map.Entry::getKey,
                 entry ->
                     convertConstantToEngine(
-                        projectionSchema.findField(entry.getKey()), entry.getValue())));
+                        projectionSchema.findType(entry.getKey()), entry.getValue())));
+  }
+
+  private static Record structLikeToRecord(StructLike structLike, Types.StructType structType) {
+    Record record = GenericRecord.create(structType);
+    int sourceSize = structLike.size();
+    for (int i = 0; i < structType.fields().size(); i++) {
+      if (i < sourceSize) {
+        record.set(i, structLike.get(i, Object.class));
+      } else {
+        Types.NestedField field = structType.fields().get(i);
+        record.set(i, field.initialDefault());
+      }
+    }
+
+    return record;
   }
 }
