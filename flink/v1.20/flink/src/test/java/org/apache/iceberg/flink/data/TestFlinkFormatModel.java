@@ -28,7 +28,7 @@ import org.apache.iceberg.data.Record;
 import org.apache.iceberg.flink.FlinkSchemaUtil;
 import org.apache.iceberg.flink.RowDataConverter;
 import org.apache.iceberg.flink.TestHelpers;
-import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 
 public class TestFlinkFormatModel extends BaseFormatModelTests<RowData> {
@@ -54,23 +54,24 @@ public class TestFlinkFormatModel extends BaseFormatModelTests<RowData> {
   }
 
   @Override
-  protected Object convertConstantToEngine(Types.NestedField field, Object value) {
-    return RowDataUtil.convertConstant(field.type(), value);
-  }
-
-  @Override
-  protected <D> List<D> convertToPartitionIdentity(
-      List<RowData> actual, int index, Class<D> clazz) {
-    List<D> partitionIdentity = Lists.newArrayList();
-    for (RowData row : actual) {
-      Object object = ((GenericRowData) row).getField(0);
-      if (object instanceof PartitionData partition) {
-        partitionIdentity.add(partition.get(index, clazz));
-      } else {
-        throw new IllegalArgumentException("Not a partition data");
+  protected Object convertConstantToEngine(Type type, Object value) {
+    if (value instanceof PartitionData partitionData) {
+      Types.StructType structType = type.asStructType();
+      List<Types.NestedField> fields = structType.fields();
+      GenericRowData rowData = new GenericRowData(fields.size());
+      int sourceSize = partitionData.size();
+      for (int i = 0; i < fields.size(); i++) {
+        if (i < sourceSize) {
+          Object fieldValue = partitionData.get(i, Object.class);
+          rowData.setField(i, convertConstantToEngine(fields.get(i).type(), fieldValue));
+        } else {
+          rowData.setField(i, null);
+        }
       }
+
+      return rowData;
     }
 
-    return partitionIdentity;
+    return RowDataUtil.convertConstant(type, value);
   }
 }
