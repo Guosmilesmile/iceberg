@@ -217,8 +217,7 @@ public abstract class BaseFormatModelTests<T> {
       readRecords = ImmutableList.copyOf(reader);
     }
 
-    List<T> list = convertToEngineRecords(genericRecords, schema);
-    assertEquals(schema, list, readRecords);
+    assertEquals(schema, convertToEngineRecords(genericRecords, schema), readRecords);
   }
 
   /** Write with engine type T, read with Generic Record */
