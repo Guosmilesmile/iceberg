@@ -51,6 +51,7 @@ import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
+import org.apache.iceberg.expressions.Literal;
 import org.apache.iceberg.formats.FileWriterBuilder;
 import org.apache.iceberg.formats.FormatModelRegistry;
 import org.apache.iceberg.inmemory.InMemoryFileIO;
@@ -99,6 +100,7 @@ public abstract class BaseFormatModelTests<T> {
   static final String FEATURE_FILTER = "filter";
   static final String FEATURE_CASE_SENSITIVE = "caseSensitive";
   static final String FEATURE_SPLIT = "split";
+  static final String FEATURE_READER_DEFAULT = "readerDefault";
   static final String FEATURE_REUSE_CONTAINERS = "reuseContainers";
   static final String FEATURE_META_ROW_LINEAGE = "metaRowLineage";
 
@@ -107,7 +109,9 @@ public abstract class BaseFormatModelTests<T> {
           FileFormat.AVRO,
           new String[] {FEATURE_FILTER, FEATURE_CASE_SENSITIVE, FEATURE_SPLIT},
           FileFormat.ORC,
-          new String[] {FEATURE_REUSE_CONTAINERS, FEATURE_META_ROW_LINEAGE});
+          new String[] {
+            FEATURE_REUSE_CONTAINERS, FEATURE_META_ROW_LINEAGE, FEATURE_READER_DEFAULT
+          });
 
   private InMemoryFileIO fileIO;
   private EncryptedOutputFile encryptedFile;
@@ -617,6 +621,69 @@ public abstract class BaseFormatModelTests<T> {
     }
 
     reuseRecords.forEach(r -> assertThat(r).isSameAs(reuseRecords.get(0)));
+  }
+
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testReaderSchemaEvolutionNewColumnWithDefault(FileFormat fileFormat) throws IOException {
+
+    assumeSupports(fileFormat, FEATURE_READER_DEFAULT);
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema writeSchema = dataGenerator.schema();
+
+    List<Record> genericRecords = dataGenerator.generateRecords();
+    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+
+    String defaultStringValue = "default_value";
+    int defaultIntValue = 42;
+
+    Schema evolvedSchema =
+        new Schema(
+            Types.NestedField.required(1, "col_a", Types.StringType.get()),
+            Types.NestedField.required(2, "col_b", Types.IntegerType.get()),
+            Types.NestedField.required(3, "col_c", Types.LongType.get()),
+            Types.NestedField.required(4, "col_d", Types.FloatType.get()),
+            Types.NestedField.required(5, "col_e", Types.DoubleType.get()),
+            Types.NestedField.required("col_f")
+                .withId(6)
+                .ofType(Types.StringType.get())
+                .withInitialDefault(Literal.of(defaultStringValue))
+                .build(),
+            Types.NestedField.optional("col_g")
+                .withId(7)
+                .ofType(Types.IntegerType.get())
+                .withInitialDefault(Literal.of(defaultIntValue))
+                .build());
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(evolvedSchema)
+            .engineProjection(engineSchema(evolvedSchema))
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(genericRecords.size());
+
+    List<Record> expectedGenericRecords =
+        genericRecords.stream()
+            .map(
+                record -> {
+                  Record expected = GenericRecord.create(evolvedSchema);
+                  for (Types.NestedField col : writeSchema.columns()) {
+                    expected.setField(col.name(), record.getField(col.name()));
+                  }
+
+                  expected.setField("col_f", defaultStringValue);
+                  expected.setField("col_g", defaultIntValue);
+                  return expected;
+                })
+            .toList();
+
+    List<T> expectedEngineRecords = convertToEngineRecords(expectedGenericRecords, evolvedSchema);
+    assertEquals(evolvedSchema, expectedEngineRecords, readRecords);
   }
 
   @ParameterizedTest
