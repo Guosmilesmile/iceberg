@@ -124,10 +124,14 @@ public class OperatorTestBase {
   }
 
   protected static Table createTable() {
-    return createTable(2);
+    return createTable(2, FileFormat.PARQUET);
   }
 
   protected static Table createTable(int formatVersion) {
+    return createPartitionedTable(formatVersion, FileFormat.PARQUET);
+  }
+
+  protected static Table createTable(int formatVersion, FileFormat fileFormat) {
     return CATALOG_EXTENSION
         .catalog()
         .createTable(
@@ -136,6 +140,8 @@ public class OperatorTestBase {
             PartitionSpec.unpartitioned(),
             null,
             ImmutableMap.of(
+                "write.format.default",
+                fileFormat.name(),
                 TableProperties.FORMAT_VERSION,
                 String.valueOf(formatVersion),
                 "flink.max-continuous-empty-commits",
@@ -158,7 +164,7 @@ public class OperatorTestBase {
                 "format-version", String.valueOf(formatVersion), "write.upsert.enabled", "true"));
   }
 
-  protected static Table createPartitionedTable(int formatVersion) {
+  protected static Table createPartitionedTable(int formatVersion, FileFormat fileFormat) {
     return CATALOG_EXTENSION
         .catalog()
         .createTable(
@@ -167,6 +173,8 @@ public class OperatorTestBase {
             PartitionSpec.builderFor(SimpleDataUtil.SCHEMA).identity("data").build(),
             null,
             ImmutableMap.of(
+                "write.format.default",
+                fileFormat.name(),
                 "format-version",
                 String.valueOf(formatVersion),
                 "flink.max-continuous-empty-commits",
@@ -174,17 +182,27 @@ public class OperatorTestBase {
   }
 
   protected static Table createPartitionedTable() {
-    return createPartitionedTable(2);
+    return createPartitionedTable(2, FileFormat.PARQUET);
   }
 
   protected void insert(Table table, Integer id, String data) throws IOException {
-    new GenericAppenderHelper(table, FileFormat.PARQUET, warehouseDir)
+    insert(table, id, data, FileFormat.PARQUET);
+  }
+
+  protected void insert(Table table, Integer id, String data, FileFormat fileFormat)
+      throws IOException {
+    new GenericAppenderHelper(table, fileFormat, warehouseDir)
         .appendToTable(Lists.newArrayList(SimpleDataUtil.createRecord(id, data)));
     table.refresh();
   }
 
   protected void insert(Table table, List<Record> records) throws IOException {
-    new GenericAppenderHelper(table, FileFormat.PARQUET, warehouseDir).appendToTable(records);
+    insert(table, records, FileFormat.PARQUET);
+  }
+
+  protected void insert(Table table, List<Record> records, FileFormat fileFormat)
+      throws IOException {
+    new GenericAppenderHelper(table, fileFormat, warehouseDir).appendToTable(records);
     table.refresh();
   }
 
@@ -271,7 +289,12 @@ public class OperatorTestBase {
   }
 
   protected void insertPartitioned(Table table, Integer id, String data) throws IOException {
-    new GenericAppenderHelper(table, FileFormat.PARQUET, warehouseDir)
+    insertPartitioned(table, id, data, FileFormat.PARQUET);
+  }
+
+  protected void insertPartitioned(Table table, Integer id, String data, FileFormat fileFormat)
+      throws IOException {
+    new GenericAppenderHelper(table, fileFormat, warehouseDir)
         .appendToTable(
             TestHelpers.Row.of(data), Lists.newArrayList(SimpleDataUtil.createRecord(id, data)));
     table.refresh();
