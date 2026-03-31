@@ -22,17 +22,19 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.List;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.variant.BinaryVariant;
 import org.apache.iceberg.parquet.VariantShreddingAnalyzer;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.variants.VariantMetadata;
 import org.apache.iceberg.variants.VariantValue;
 
-public class FlinkVariantShreddingAnalyzer extends VariantShreddingAnalyzer<RowData> {
+public class FlinkVariantShreddingAnalyzer extends VariantShreddingAnalyzer<RowData, RowType> {
 
   @Override
   protected List<VariantValue> extractVariantValues(
       List<RowData> bufferedRows, int variantFieldIndex) {
-    List<VariantValue> values = new java.util.ArrayList<>();
+    List<VariantValue> values = Lists.newArrayList();
 
     for (RowData row : bufferedRows) {
       if (!row.isNullAt(variantFieldIndex)) {
@@ -50,5 +52,14 @@ public class FlinkVariantShreddingAnalyzer extends VariantShreddingAnalyzer<RowD
     }
 
     return values;
+  }
+
+  @Override
+  protected int resolveColumnIndex(RowType flinkSchema, String columnName) {
+    try {
+      return flinkSchema.getFieldIndex(columnName);
+    } catch (IllegalArgumentException e) {
+      return -1;
+    }
   }
 }
