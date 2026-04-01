@@ -609,6 +609,401 @@ public abstract class BaseFormatModelTests<T> {
         .isInstanceOf(UnsupportedOperationException.class);
   }
 
+  /**
+   * Schema evolution: Adding column (reading with wider schema). Write with DefaultSchema, read
+   * with additional optional columns. The new columns should be filled with null values.
+   */
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionAddColumn(FileFormat fileFormat) throws IOException {
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema writeSchema = dataGenerator.schema();
+
+    List<Record> genericRecords = dataGenerator.generateRecords();
+    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+
+    Schema readSchema =
+        new Schema(
+            Types.NestedField.required(1, "col_a", Types.StringType.get()),
+            Types.NestedField.required(2, "col_b", Types.IntegerType.get()),
+            Types.NestedField.required(3, "col_c", Types.LongType.get()),
+            Types.NestedField.required(4, "col_d", Types.FloatType.get()),
+            Types.NestedField.required(5, "col_e", Types.DoubleType.get()),
+            Types.NestedField.optional(6, "new_string_col", Types.StringType.get()),
+            Types.NestedField.optional(7, "new_int_col", Types.IntegerType.get()));
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(readSchema)
+            .engineProjection(engineSchema(readSchema))
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(genericRecords.size());
+
+    List<Record> expectedGenericRecords =
+        genericRecords.stream()
+            .map(
+                record -> {
+                  Record expected = GenericRecord.create(readSchema);
+                  for (Types.NestedField col : writeSchema.columns()) {
+                    expected.setField(col.name(), record.getField(col.name()));
+                  }
+
+                  expected.setField("new_string_col", null);
+                  expected.setField("new_int_col", null);
+                  return expected;
+                })
+            .toList();
+
+    List<T> expectedEngineRecords = convertToEngineRecords(expectedGenericRecords, readSchema);
+    assertEquals(readSchema, expectedEngineRecords, readRecords);
+  }
+
+  /**
+   * Schema evolution: Projection / Removing column (reading with narrower schema). Write with
+   * DefaultSchema, read with only a subset of columns (skipping middle columns).
+   */
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionProjection(FileFormat fileFormat) throws IOException {
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema writeSchema = dataGenerator.schema();
+
+    List<Record> genericRecords = dataGenerator.generateRecords();
+    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+
+    Schema projectedSchema =
+        new Schema(
+            Types.NestedField.required(1, "col_a", Types.StringType.get()),
+            Types.NestedField.required(5, "col_e", Types.DoubleType.get()));
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(projectedSchema)
+            .engineProjection(engineSchema(projectedSchema))
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(genericRecords.size());
+
+    List<Record> expectedGenericRecords =
+        genericRecords.stream()
+            .map(
+                record -> {
+                  Record expected = GenericRecord.create(projectedSchema);
+                  expected.setField("col_a", record.getField("col_a"));
+                  expected.setField("col_e", record.getField("col_e"));
+                  return expected;
+                })
+            .toList();
+
+    assertEquals(
+        projectedSchema,
+        convertToEngineRecords(expectedGenericRecords, projectedSchema),
+        readRecords);
+  }
+
+  /**
+   * Schema evolution: Removing and adding a column with the same name (name mapping). Write with
+   * DefaultSchema where col_b has field ID 2. Read with a schema where col_b has field ID 6 (a new
+   * column). The NameMapping maps file column name "col_b" to old field ID 2. Since the read schema
+   * expects field ID 6, the new col_b should be null.
+   */
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionReNameMapping(FileFormat fileFormat) throws IOException {
+
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema writeSchema = dataGenerator.schema();
+
+    List<Record> genericRecords = dataGenerator.generateRecords();
+    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+
+    // Remove col_b and add a new col_b with a different field ID
+    Schema readSchema =
+        new Schema(
+            Types.NestedField.required(1, "col_a", Types.StringType.get()),
+            Types.NestedField.optional(6, "col_b", Types.IntegerType.get()),
+            Types.NestedField.required(3, "col_c", Types.LongType.get()),
+            Types.NestedField.required(4, "col_d", Types.FloatType.get()),
+            Types.NestedField.required(5, "col_e", Types.DoubleType.get()));
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(readSchema)
+            .engineProjection(engineSchema(readSchema))
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(genericRecords.size());
+
+    List<Record> expectedGenericRecords =
+        genericRecords.stream()
+            .map(
+                record -> {
+                  Record expected = GenericRecord.create(readSchema);
+                  expected.setField("col_a", record.getField("col_a"));
+                  expected.setField("col_b", null);
+                  expected.setField("col_c", record.getField("col_c"));
+                  expected.setField("col_d", record.getField("col_d"));
+                  expected.setField("col_e", record.getField("col_e"));
+                  return expected;
+                })
+            .toList();
+
+    assertEquals(
+        readSchema, convertToEngineRecords(expectedGenericRecords, readSchema), readRecords);
+  }
+
+  /**
+   * Schema evolution: Allowed type changes. Write with DefaultSchema (col_b:int, col_d:float), read
+   * with promoted types (col_b:long, col_d:double).
+   */
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionTypePromotion(FileFormat fileFormat) throws IOException {
+
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema writeSchema = dataGenerator.schema();
+
+    List<Record> genericRecords = dataGenerator.generateRecords();
+    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+
+    // Read with promoted types: `col_b` int → long, `col_d` float → double
+    Schema readSchema =
+        new Schema(
+            Types.NestedField.required(1, "col_a", Types.StringType.get()),
+            Types.NestedField.required(2, "col_b", Types.LongType.get()),
+            Types.NestedField.required(3, "col_c", Types.LongType.get()),
+            Types.NestedField.required(4, "col_d", Types.DoubleType.get()),
+            Types.NestedField.required(5, "col_e", Types.DoubleType.get()));
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(readSchema)
+            .engineProjection(engineSchema(readSchema))
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(genericRecords.size());
+
+    List<Record> expectedGenericRecords =
+        genericRecords.stream()
+            .map(
+                record -> {
+                  Record expected = GenericRecord.create(readSchema);
+                  expected.setField("col_a", record.getField("col_a"));
+                  expected.setField("col_b", ((Integer) record.getField("col_b")).longValue());
+                  expected.setField("col_c", record.getField("col_c"));
+                  expected.setField("col_d", ((Float) record.getField("col_d")).doubleValue());
+                  expected.setField("col_e", record.getField("col_e"));
+                  return expected;
+                })
+            .toList();
+
+    assertEquals(
+        readSchema, convertToEngineRecords(expectedGenericRecords, readSchema), readRecords);
+  }
+
+  /**
+   * Schema evolution: Reorder columns. Write with DefaultSchema {col_a, col_b, col_c, col_d,
+   * col_e}, read with reordered schema {col_e, col_c, col_a, col_d, col_b}.
+   */
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionReorderColumns(FileFormat fileFormat) throws IOException {
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema writeSchema = dataGenerator.schema();
+
+    List<Record> genericRecords = dataGenerator.generateRecords();
+    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+
+    Schema reorderedSchema =
+        new Schema(
+            Types.NestedField.required(5, "col_e", Types.DoubleType.get()),
+            Types.NestedField.required(3, "col_c", Types.LongType.get()),
+            Types.NestedField.required(1, "col_a", Types.StringType.get()),
+            Types.NestedField.required(4, "col_d", Types.FloatType.get()),
+            Types.NestedField.required(2, "col_b", Types.IntegerType.get()));
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(reorderedSchema)
+            .engineProjection(engineSchema(reorderedSchema))
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(genericRecords.size());
+
+    List<Record> expectedGenericRecords =
+        genericRecords.stream()
+            .map(
+                record -> {
+                  Record expected = GenericRecord.create(reorderedSchema);
+                  for (Types.NestedField col : reorderedSchema.columns()) {
+                    expected.setField(col.name(), record.getField(col.name()));
+                  }
+
+                  return expected;
+                })
+            .toList();
+
+    assertEquals(
+        reorderedSchema,
+        convertToEngineRecords(expectedGenericRecords, reorderedSchema),
+        readRecords);
+  }
+
+  /**
+   * Schema evolution: Rename column. Write with DefaultSchema where col_b has field ID 2. Read with
+   * a schema where the same field ID 2 is renamed to "column_b". Since Iceberg binds by field ID,
+   * the renamed column should still read the original data correctly.
+   */
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionRenameColumn(FileFormat fileFormat) throws IOException {
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema writeSchema = dataGenerator.schema();
+
+    List<Record> genericRecords = dataGenerator.generateRecords();
+    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+
+    // rename col_b(id=2) -> column_b, col_d(id=4) -> column_d
+    Schema renamedSchema =
+        new Schema(
+            Types.NestedField.required(1, "col_a", Types.StringType.get()),
+            Types.NestedField.required(2, "column_b", Types.IntegerType.get()),
+            Types.NestedField.required(3, "col_c", Types.LongType.get()),
+            Types.NestedField.required(4, "column_d", Types.FloatType.get()),
+            Types.NestedField.required(5, "col_e", Types.DoubleType.get()));
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(renamedSchema)
+            .engineProjection(engineSchema(renamedSchema))
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(genericRecords.size());
+
+    List<Record> expectedGenericRecords =
+        genericRecords.stream()
+            .map(
+                record -> {
+                  Record expected = GenericRecord.create(renamedSchema);
+                  expected.setField("col_a", record.getField("col_a"));
+                  expected.setField("column_b", record.getField("col_b"));
+                  expected.setField("col_c", record.getField("col_c"));
+                  expected.setField("column_d", record.getField("col_d"));
+                  expected.setField("col_e", record.getField("col_e"));
+                  return expected;
+                })
+            .toList();
+
+    assertEquals(
+        renamedSchema, convertToEngineRecords(expectedGenericRecords, renamedSchema), readRecords);
+  }
+
+  /**
+   * Schema evolution: Required → Optional. Write with DefaultSchema where all columns are required.
+   * Read with a schema where some columns are changed to optional. Iceberg allows widening required
+   * to optional. The data should still be read correctly.
+   */
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionRequiredToOptional(FileFormat fileFormat) throws IOException {
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema writeSchema = dataGenerator.schema();
+
+    List<Record> genericRecords = dataGenerator.generateRecords();
+    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+
+    // change col_b and col_d to optional
+    Schema readSchema =
+        new Schema(
+            Types.NestedField.required(1, "col_a", Types.StringType.get()),
+            Types.NestedField.optional(2, "col_b", Types.IntegerType.get()),
+            Types.NestedField.required(3, "col_c", Types.LongType.get()),
+            Types.NestedField.optional(4, "col_d", Types.FloatType.get()),
+            Types.NestedField.required(5, "col_e", Types.DoubleType.get()));
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(readSchema)
+            .engineProjection(engineSchema(readSchema))
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(genericRecords.size());
+
+    List<Record> expectedGenericRecords =
+        genericRecords.stream()
+            .map(
+                record -> {
+                  Record expected = GenericRecord.create(readSchema);
+                  for (Types.NestedField col : readSchema.columns()) {
+                    expected.setField(col.name(), record.getField(col.name()));
+                  }
+
+                  return expected;
+                })
+            .toList();
+
+    assertEquals(
+        readSchema, convertToEngineRecords(expectedGenericRecords, readSchema), readRecords);
+  }
+
+  /**
+   * Schema evolution: Read with empty projection. Write with DefaultSchema, read with an empty
+   * schema (no columns). The reader should return the correct number of rows but with no data
+   * columns.
+   */
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionEmptyProjection(FileFormat fileFormat) throws IOException {
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema writeSchema = dataGenerator.schema();
+
+    List<Record> genericRecords = dataGenerator.generateRecords();
+    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+
+    Schema emptySchema = new Schema();
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(emptySchema)
+            .engineProjection(engineSchema(emptySchema))
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(genericRecords.size());
+  }
+
   private void readAndAssertGenericRecords(
       FileFormat fileFormat, Schema schema, List<Record> expected) throws IOException {
     InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
