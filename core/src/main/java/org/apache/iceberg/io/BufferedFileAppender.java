@@ -122,7 +122,6 @@ public class BufferedFileAppender<D> implements FileAppender<D> {
   @Override
   public void close() throws IOException {
     if (!closed) {
-      this.closed = true;
       if (delegate == null && buffer != null && !buffer.isEmpty()) {
         initialize();
       }
@@ -130,13 +129,19 @@ public class BufferedFileAppender<D> implements FileAppender<D> {
       if (delegate != null) {
         delegate.close();
       }
+
+      this.closed = true;
+      this.buffer = null;
     }
   }
 
   private void initialize() {
     delegate = appenderFactory.apply(buffer);
     Preconditions.checkState(delegate != null, "appenderFactory must not return null");
-    buffer.forEach(delegate::add);
-    buffer = null;
+    try {
+      buffer.forEach(delegate::add);
+    } finally {
+      buffer = null;
+    }
   }
 }

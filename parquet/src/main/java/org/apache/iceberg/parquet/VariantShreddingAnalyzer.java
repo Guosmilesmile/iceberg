@@ -27,6 +27,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.types.Types.NestedField;
 import org.apache.iceberg.variants.PhysicalType;
 import org.apache.iceberg.variants.VariantArray;
 import org.apache.iceberg.variants.VariantObject;
@@ -96,9 +97,7 @@ public abstract class VariantShreddingAnalyzer<T, S> {
       return null;
     }
 
-    if (rootType == PhysicalType.OBJECT) {
-      pruneInfrequentFields(root, root.info.observationCount);
-    }
+    pruneInfrequentFields(root, root.info.observationCount);
 
     return buildTypedValue(root, rootType);
   }
@@ -124,7 +123,7 @@ public abstract class VariantShreddingAnalyzer<T, S> {
   public Map<Integer, Type> analyzeVariantColumns(
       List<T> bufferedRows, Schema icebergSchema, S engineSchema) {
     Map<Integer, Type> shreddedTypes = Maps.newHashMap();
-    for (org.apache.iceberg.types.Types.NestedField col : icebergSchema.columns()) {
+    for (NestedField col : icebergSchema.columns()) {
       if (col.type().isVariantType()) {
         int rowIndex = resolveColumnIndex(engineSchema, col.name());
         if (rowIndex >= 0) {
@@ -151,7 +150,7 @@ public abstract class VariantShreddingAnalyzer<T, S> {
   }
 
   private static void pruneInfrequentFields(PathNode node, int totalRows) {
-    if (node.objectChildren.isEmpty()) {
+    if (node.objectChildren.isEmpty() && node.arrayElement == null) {
       return;
     }
 
@@ -182,9 +181,14 @@ public abstract class VariantShreddingAnalyzer<T, S> {
       node.objectChildren.entrySet().removeIf(entry -> !keep.contains(entry.getKey()));
     }
 
-    // Recurse into remaining children
+    // Recurse into remaining object children
     for (PathNode child : node.objectChildren.values()) {
       pruneInfrequentFields(child, totalRows);
+    }
+
+    // Recurse into array elements (arrays of objects need pruning too)
+    if (node.arrayElement != null) {
+      pruneInfrequentFields(node.arrayElement, totalRows);
     }
   }
 
@@ -316,7 +320,7 @@ public abstract class VariantShreddingAnalyzer<T, S> {
   /** Use DECIMAL with maximum precision and scale as the shredding type */
   private static Type createDecimalTypedValue(FieldInfo info) {
     int maxPrecision = Math.min(info.maxDecimalIntegerDigits + info.maxDecimalScale, 38);
-    int maxScale = Math.min(info.maxDecimalScale, maxPrecision);
+    int maxScale = Math.min(info.maxDecimalScale, Math.max(0, 38 - info.maxDecimalIntegerDigits));
 
     if (maxPrecision <= 9) {
       return Types.optional(PrimitiveType.PrimitiveTypeName.INT32)
