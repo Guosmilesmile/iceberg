@@ -636,35 +636,24 @@ public abstract class BaseFormatModelTests<T> {
     String defaultStringValue = "default_value";
     int defaultIntValue = 42;
 
-    Schema evolvedSchema =
-        new Schema(
-            Types.NestedField.required(1, "col_a", Types.StringType.get()),
-            Types.NestedField.required(2, "col_b", Types.IntegerType.get()),
-            Types.NestedField.required(3, "col_c", Types.LongType.get()),
-            Types.NestedField.required(4, "col_d", Types.FloatType.get()),
-            Types.NestedField.required(5, "col_e", Types.DoubleType.get()),
-            Types.NestedField.required("col_f")
-                .withId(6)
-                .ofType(Types.StringType.get())
-                .withInitialDefault(Literal.of(defaultStringValue))
-                .build(),
-            Types.NestedField.optional("col_g")
-                .withId(7)
-                .ofType(Types.IntegerType.get())
-                .withInitialDefault(Literal.of(defaultIntValue))
-                .build());
+    int maxFieldId =
+        writeSchema.columns().stream().mapToInt(Types.NestedField::fieldId).max().orElse(0);
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(evolvedSchema)
-            .engineProjection(engineSchema(evolvedSchema))
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
+    List<Types.NestedField> evolvedColumns = Lists.newArrayList(writeSchema.columns());
+    evolvedColumns.add(
+        Types.NestedField.required("col_f")
+            .withId(maxFieldId + 1)
+            .ofType(Types.StringType.get())
+            .withInitialDefault(Literal.of(defaultStringValue))
+            .build());
+    evolvedColumns.add(
+        Types.NestedField.optional("col_g")
+            .withId(maxFieldId + 2)
+            .ofType(Types.IntegerType.get())
+            .withInitialDefault(Literal.of(defaultIntValue))
+            .build());
 
-    assertThat(readRecords).hasSize(genericRecords.size());
+    Schema evolvedSchema = new Schema(evolvedColumns);
 
     List<Record> expectedGenericRecords =
         genericRecords.stream()
@@ -681,8 +670,7 @@ public abstract class BaseFormatModelTests<T> {
                 })
             .toList();
 
-    List<T> expectedEngineRecords = convertToEngineRecords(expectedGenericRecords, evolvedSchema);
-    assertEquals(evolvedSchema, expectedEngineRecords, readRecords);
+    readAndAssertGenericRecords(fileFormat, evolvedSchema, expectedGenericRecords);
   }
 
   @ParameterizedTest
@@ -706,7 +694,7 @@ public abstract class BaseFormatModelTests<T> {
 
   @ParameterizedTest
   @FieldSource("FILE_FORMATS")
-  void testReadMetadataColumnsFilePathAndSpecId(FileFormat fileFormat) throws IOException {
+  void testReadMetadataColumnFilePath(FileFormat fileFormat) throws IOException {
 
     DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
     Schema schema = dataGenerator.schema();
@@ -714,37 +702,45 @@ public abstract class BaseFormatModelTests<T> {
     writeGenericRecords(fileFormat, schema, genericRecords);
 
     String filePath = "test-data-file.parquet";
-    int specId = 0;
-    Schema projectionSchema = new Schema(MetadataColumns.FILE_PATH, MetadataColumns.SPEC_ID);
+    Schema projectionSchema = new Schema(MetadataColumns.FILE_PATH);
 
     Map<Integer, Object> idToConstant =
-        ImmutableMap.of(
-            MetadataColumns.FILE_PATH.fieldId(), filePath,
-            MetadataColumns.SPEC_ID.fieldId(), specId);
-
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(projectionSchema)
-            .engineProjection(engineSchema(projectionSchema))
-            .idToConstant(convertConstantsToEngine(projectionSchema, idToConstant))
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
+        ImmutableMap.of(MetadataColumns.FILE_PATH.fieldId(), filePath);
 
     List<Record> expected =
         IntStream.range(0, genericRecords.size())
             .mapToObj(
                 i ->
                     GenericRecord.create(projectionSchema)
-                        .copy(
-                            MetadataColumns.FILE_PATH.name(), filePath,
-                            MetadataColumns.SPEC_ID.name(), specId))
+                        .copy(MetadataColumns.FILE_PATH.name(), filePath))
             .toList();
 
-    assertThat(readRecords).hasSize(genericRecords.size());
-    assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
+    readAndAssertMetadataColumn(fileFormat, projectionSchema, idToConstant, expected);
+  }
+
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testReadMetadataColumnSpecId(FileFormat fileFormat) throws IOException {
+
+    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
+    Schema schema = dataGenerator.schema();
+    List<Record> genericRecords = dataGenerator.generateRecords();
+    writeGenericRecords(fileFormat, schema, genericRecords);
+
+    int specId = 0;
+    Schema projectionSchema = new Schema(MetadataColumns.SPEC_ID);
+
+    Map<Integer, Object> idToConstant = ImmutableMap.of(MetadataColumns.SPEC_ID.fieldId(), specId);
+
+    List<Record> expected =
+        IntStream.range(0, genericRecords.size())
+            .mapToObj(
+                i ->
+                    GenericRecord.create(projectionSchema)
+                        .copy(MetadataColumns.SPEC_ID.name(), specId))
+            .toList();
+
+    readAndAssertMetadataColumn(fileFormat, projectionSchema, idToConstant, expected);
   }
 
   @ParameterizedTest
@@ -758,16 +754,6 @@ public abstract class BaseFormatModelTests<T> {
 
     Schema projectionSchema = new Schema(MetadataColumns.ROW_POSITION);
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(projectionSchema)
-            .engineProjection(engineSchema(projectionSchema))
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
     List<Record> expected =
         IntStream.range(0, genericRecords.size())
             .mapToObj(
@@ -776,8 +762,7 @@ public abstract class BaseFormatModelTests<T> {
                         .copy(MetadataColumns.ROW_POSITION.name(), (long) i))
             .toList();
 
-    assertThat(readRecords).hasSize(genericRecords.size());
-    assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
+    readAndAssertMetadataColumn(fileFormat, projectionSchema, null, expected);
   }
 
   @ParameterizedTest
@@ -791,16 +776,6 @@ public abstract class BaseFormatModelTests<T> {
 
     Schema projectionSchema = new Schema(MetadataColumns.IS_DELETED);
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(projectionSchema)
-            .engineProjection(engineSchema(projectionSchema))
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
     List<Record> expected =
         IntStream.range(0, genericRecords.size())
             .mapToObj(
@@ -809,8 +784,7 @@ public abstract class BaseFormatModelTests<T> {
                         .copy(MetadataColumns.IS_DELETED.name(), false))
             .toList();
 
-    assertThat(readRecords).hasSize(genericRecords.size());
-    assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
+    readAndAssertMetadataColumn(fileFormat, projectionSchema, null, expected);
   }
 
   @ParameterizedTest
@@ -833,17 +807,6 @@ public abstract class BaseFormatModelTests<T> {
             MetadataColumns.ROW_ID.fieldId(), baseRowId,
             MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.fieldId(), fileSeqNumber);
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(projectionSchema)
-            .engineProjection(engineSchema(projectionSchema))
-            .idToConstant(convertConstantsToEngine(projectionSchema, idToConstant))
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
     List<Record> expected =
         IntStream.range(0, genericRecords.size())
             .mapToObj(
@@ -856,8 +819,7 @@ public abstract class BaseFormatModelTests<T> {
                             fileSeqNumber))
             .toList();
 
-    assertThat(readRecords).hasSize(genericRecords.size());
-    assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
+    readAndAssertMetadataColumn(fileFormat, projectionSchema, idToConstant, expected);
   }
 
   @ParameterizedTest
@@ -910,17 +872,6 @@ public abstract class BaseFormatModelTests<T> {
             MetadataColumns.ROW_ID.fieldId(), baseRowId,
             MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.fieldId(), fileSeqNumber);
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(projectionSchema)
-            .engineProjection(engineSchema(projectionSchema))
-            .idToConstant(convertConstantsToEngine(projectionSchema, idToConstant))
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
     // Expected results:
     // - Even rows (explicit values): _row_id = 555+i, _last_updated_sequence_number = 7
     // - Odd rows (null values): _row_id = baseRowId+pos, _last_updated_sequence_number =
@@ -947,8 +898,7 @@ public abstract class BaseFormatModelTests<T> {
                 })
             .toList();
 
-    assertThat(readRecords).hasSize(baseRecords.size());
-    assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
+    readAndAssertMetadataColumn(fileFormat, projectionSchema, idToConstant, expected);
   }
 
   @ParameterizedTest
@@ -984,17 +934,6 @@ public abstract class BaseFormatModelTests<T> {
     Map<Integer, Object> idToConstant =
         ImmutableMap.of(MetadataColumns.PARTITION_COLUMN_ID, partitionData);
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(projectionSchema)
-            .engineProjection(engineSchema(projectionSchema))
-            .idToConstant(convertConstantsToEngine(projectionSchema, idToConstant))
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
     Record partitionRecord = structLikeToRecord(partitionData, partitionType);
     List<Record> expected =
         IntStream.range(0, records.size())
@@ -1004,8 +943,7 @@ public abstract class BaseFormatModelTests<T> {
                         .copy(MetadataColumns.PARTITION_COLUMN_NAME, partitionRecord))
             .toList();
 
-    assertThat(readRecords).hasSize(records.size());
-    assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
+    readAndAssertMetadataColumn(fileFormat, projectionSchema, idToConstant, expected);
   }
 
   @ParameterizedTest
@@ -1061,7 +999,6 @@ public abstract class BaseFormatModelTests<T> {
     try (CloseableIterable<T> reader =
         FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
             .project(projectionSchema)
-            .engineProjection(engineSchema(projectionSchema))
             .idToConstant(convertConstantsToEngine(projectionSchema, idToConstant))
             .build()) {
       readRecords = ImmutableList.copyOf(reader);
@@ -1129,7 +1066,6 @@ public abstract class BaseFormatModelTests<T> {
     try (CloseableIterable<T> reader =
         FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
             .project(projectionSchema)
-            .engineProjection(engineSchema(projectionSchema))
             .idToConstant(convertConstantsToEngine(projectionSchema, idToConstant))
             .build()) {
       readRecords = ImmutableList.copyOf(reader);
@@ -1198,7 +1134,7 @@ public abstract class BaseFormatModelTests<T> {
     return records.stream().map(r -> convertToEngine(r, schema)).toList();
   }
 
-  private static void assumeSupports(FileFormat fileFormat, String feature) {
+  private void assumeSupports(FileFormat fileFormat, String feature) {
     assumeThat(MISSING_FEATURES.getOrDefault(fileFormat, new String[] {})).doesNotContain(feature);
   }
 
@@ -1231,7 +1167,7 @@ public abstract class BaseFormatModelTests<T> {
     return dataFile;
   }
 
-  private static String splitSizeProperty(FileFormat fileFormat) {
+  private String splitSizeProperty(FileFormat fileFormat) {
     return switch (fileFormat) {
       case PARQUET -> TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES;
       case ORC -> TableProperties.ORC_STRIPE_SIZE_BYTES;
@@ -1252,7 +1188,7 @@ public abstract class BaseFormatModelTests<T> {
                         projectionSchema.findType(entry.getKey()), entry.getValue())));
   }
 
-  private static Record structLikeToRecord(StructLike structLike, Types.StructType structType) {
+  private Record structLikeToRecord(StructLike structLike, Types.StructType structType) {
     Record record = GenericRecord.create(structType);
     int sourceSize = structLike.size();
     for (int i = 0; i < structType.fields().size(); i++) {
@@ -1265,5 +1201,32 @@ public abstract class BaseFormatModelTests<T> {
     }
 
     return record;
+  }
+
+  private void readAndAssertMetadataColumn(
+      FileFormat fileFormat,
+      Schema projectionSchema,
+      Map<Integer, Object> idToConstant,
+      List<Record> expectedRecords)
+      throws IOException {
+
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+
+    var readerBuilder =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(projectionSchema);
+
+    if (idToConstant != null) {
+      readerBuilder.idToConstant(convertConstantsToEngine(projectionSchema, idToConstant));
+    }
+
+    try (CloseableIterable<T> reader = readerBuilder.build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(expectedRecords.size());
+    assertEquals(
+        projectionSchema, convertToEngineRecords(expectedRecords, projectionSchema), readRecords);
   }
 }
