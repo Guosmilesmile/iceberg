@@ -652,6 +652,21 @@ public abstract class BaseFormatModelTests<T> {
             .ofType(Types.IntegerType.get())
             .withInitialDefault(Literal.of(defaultIntValue))
             .build());
+    evolvedColumns.add(
+        Types.NestedField.optional("col_h")
+            .withId(maxFieldId + 3)
+            .ofType(
+                Types.MapType.ofOptional(
+                    maxFieldId + 4,
+                    maxFieldId + 5,
+                    Types.StringType.get(),
+                    Types.IntegerType.get()))
+            .build());
+    evolvedColumns.add(
+        Types.NestedField.optional("col_i")
+            .withId(maxFieldId + 6)
+            .ofType(Types.ListType.ofOptional(maxFieldId + 7, Types.StringType.get()))
+            .build());
 
     Schema evolvedSchema = new Schema(evolvedColumns);
 
@@ -666,6 +681,8 @@ public abstract class BaseFormatModelTests<T> {
 
                   expected.setField("col_f", defaultStringValue);
                   expected.setField("col_g", defaultIntValue);
+                  expected.setField("col_h", null);
+                  expected.setField("col_i", null);
                   return expected;
                 })
             .toList();
@@ -1116,7 +1133,7 @@ public abstract class BaseFormatModelTests<T> {
     assertThat(dataFile.format()).isEqualTo(fileFormat);
   }
 
-  private List<Record> projectRecords(List<Record> records, Schema projectedSchema) {
+  private static List<Record> projectRecords(List<Record> records, Schema projectedSchema) {
     return records.stream()
         .map(
             record -> {
@@ -1134,7 +1151,7 @@ public abstract class BaseFormatModelTests<T> {
     return records.stream().map(r -> convertToEngine(r, schema)).toList();
   }
 
-  private void assumeSupports(FileFormat fileFormat, String feature) {
+  private static void assumeSupports(FileFormat fileFormat, String feature) {
     assumeThat(MISSING_FEATURES.getOrDefault(fileFormat, new String[] {})).doesNotContain(feature);
   }
 
@@ -1167,7 +1184,7 @@ public abstract class BaseFormatModelTests<T> {
     return dataFile;
   }
 
-  private String splitSizeProperty(FileFormat fileFormat) {
+  private static String splitSizeProperty(FileFormat fileFormat) {
     return switch (fileFormat) {
       case PARQUET -> TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES;
       case ORC -> TableProperties.ORC_STRIPE_SIZE_BYTES;
@@ -1188,7 +1205,7 @@ public abstract class BaseFormatModelTests<T> {
                         projectionSchema.findType(entry.getKey()), entry.getValue())));
   }
 
-  private Record structLikeToRecord(StructLike structLike, Types.StructType structType) {
+  private static Record structLikeToRecord(StructLike structLike, Types.StructType structType) {
     Record record = GenericRecord.create(structType);
     int sourceSize = structLike.size();
     for (int i = 0; i < structType.fields().size(); i++) {
