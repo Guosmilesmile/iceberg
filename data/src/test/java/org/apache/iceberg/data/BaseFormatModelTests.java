@@ -103,13 +103,13 @@ public abstract class BaseFormatModelTests<T> {
   static final String FEATURE_CASE_SENSITIVE = "caseSensitive";
   static final String FEATURE_SPLIT = "split";
   static final String FEATURE_REUSE_CONTAINERS = "reuseContainers";
-  static final String FEATURE_METRIC_COLLECT = "metricCollect";
+  static final String FEATURE_COLUMN_LEVEL_METRICS = "columnLevelMetrics";
 
   private static final Map<FileFormat, String[]> MISSING_FEATURES =
       Map.of(
           FileFormat.AVRO,
           new String[] {
-            FEATURE_FILTER, FEATURE_CASE_SENSITIVE, FEATURE_SPLIT, FEATURE_METRIC_COLLECT
+            FEATURE_FILTER, FEATURE_CASE_SENSITIVE, FEATURE_SPLIT, FEATURE_COLUMN_LEVEL_METRICS
           },
           FileFormat.ORC,
           new String[] {FEATURE_REUSE_CONTAINERS});
@@ -137,6 +137,8 @@ public abstract class BaseFormatModelTests<T> {
     if (fileIO != null) {
       fileIO.close();
     }
+
+    TestTables.clearTables();
   }
 
   /** Write with engine type T, read with Generic Record */
@@ -412,6 +414,9 @@ public abstract class BaseFormatModelTests<T> {
     assumeSupports(fileFormat, FEATURE_FILTER);
 
     Schema schema = SCHEMA;
+    new Schema(
+        Types.NestedField.required(1, "id", Types.IntegerType.get()),
+        Types.NestedField.required(2, "data", Types.StringType.get()));
 
     // Generate records with known id values [0, count)
     int count = 10000;
@@ -644,29 +649,17 @@ public abstract class BaseFormatModelTests<T> {
   void testDataWriterMetricsCollection(FileFormat fileFormat) throws IOException {
     DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
     Schema schema = dataGenerator.schema();
-    FileWriterBuilder<DataWriter<Record>, Object> writerBuilder =
-        FormatModelRegistry.dataWriteBuilder(fileFormat, Record.class, encryptedFile);
-
-    DataWriter<Record> writer =
-        writerBuilder.schema(schema).spec(PartitionSpec.unpartitioned()).build();
 
     List<Record> genericRecords = dataGenerator.generateRecords();
-
-    try (writer) {
-      genericRecords.forEach(writer::write);
-    }
-
-    DataFile dataFile = writer.toDataFile();
+    DataFile dataFile = writeGenericRecords(fileFormat, schema, genericRecords);
 
     assertThat(dataFile).isNotNull();
     assertThat(dataFile.recordCount()).isEqualTo(genericRecords.size());
 
-    // AVRO Only support metric collection with rowCount
-    assumeSupports(fileFormat, FEATURE_METRIC_COLLECT);
-
     assertValueAndNullCounts(
-        schema, genericRecords, dataFile.valueCounts(), dataFile.nullValueCounts());
-    assertBounds(schema, genericRecords, dataFile.lowerBounds(), dataFile.upperBounds());
+        fileFormat, schema, genericRecords, dataFile.valueCounts(), dataFile.nullValueCounts());
+    assertBounds(
+        fileFormat, schema, genericRecords, dataFile.lowerBounds(), dataFile.upperBounds());
 
     assertThat(dataFile.columnSizes()).isNotNull().isNotEmpty();
   }
@@ -674,10 +667,6 @@ public abstract class BaseFormatModelTests<T> {
   @ParameterizedTest
   @FieldSource("FILE_FORMATS")
   void testDataWriterMetricsWithNoneMode(FileFormat fileFormat) throws IOException {
-
-    // AVRO Only support metric collection with rowCount
-    assumeSupports(fileFormat, FEATURE_METRIC_COLLECT);
-
     DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
     Schema schema = dataGenerator.schema();
 
@@ -691,48 +680,19 @@ public abstract class BaseFormatModelTests<T> {
             ImmutableMap.of(TableProperties.DEFAULT_WRITE_METRICS_MODE, "none"));
 
     MetricsConfig noneConfig = MetricsConfig.forTable(table);
-
-    FileWriterBuilder<DataWriter<Record>, Object> writerBuilder =
-        FormatModelRegistry.dataWriteBuilder(fileFormat, Record.class, encryptedFile);
-
-    DataWriter<Record> writer =
-        writerBuilder
-            .schema(schema)
-            .spec(PartitionSpec.unpartitioned())
-            .metricsConfig(noneConfig)
-            .build();
-
     List<Record> genericRecords = dataGenerator.generateRecords();
-
-    try (writer) {
-      genericRecords.forEach(writer::write);
-    }
-
-    DataFile dataFile = writer.toDataFile();
+    DataFile dataFile = writeGenericRecords(fileFormat, schema, genericRecords, noneConfig);
 
     assertThat(dataFile).isNotNull();
     assertThat(dataFile.recordCount()).isEqualTo(genericRecords.size());
 
-    // In `None` mode, `valueCounts`, `nullValueCounts`, `lowerBounds`, and `upperBounds` should be
-    // empty/null.
-    for (Types.NestedField field : schema.columns()) {
-      if (field.type().isPrimitiveType()) {
-        assertThat(dataFile.valueCounts().get(field.fieldId())).isNull();
-        assertThat(dataFile.nullValueCounts().get(field.fieldId())).isNull();
-        assertThat(dataFile.lowerBounds().get(field.fieldId())).isNull();
-        assertThat(dataFile.upperBounds().get(field.fieldId())).isNull();
-      }
-    }
-
-    TestTables.clearTables();
+    assertCountsNull(fileFormat, schema, dataFile.valueCounts(), dataFile.nullValueCounts());
+    assertBoundsNull(fileFormat, schema, dataFile.lowerBounds(), dataFile.upperBounds());
   }
 
   @ParameterizedTest
   @FieldSource("FILE_FORMATS")
   void testDataWriterMetricsWithCountsMode(FileFormat fileFormat) throws IOException {
-    // AVRO Only support metric collection with rowCount
-    assumeSupports(fileFormat, FEATURE_METRIC_COLLECT);
-
     DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
     Schema schema = dataGenerator.schema();
     TestTables.TestTable table =
@@ -746,23 +706,8 @@ public abstract class BaseFormatModelTests<T> {
 
     MetricsConfig countsConfig = MetricsConfig.forTable(table);
 
-    FileWriterBuilder<DataWriter<Record>, Object> writerBuilder =
-        FormatModelRegistry.dataWriteBuilder(fileFormat, Record.class, encryptedFile);
-
-    DataWriter<Record> writer =
-        writerBuilder
-            .schema(schema)
-            .spec(PartitionSpec.unpartitioned())
-            .metricsConfig(countsConfig)
-            .build();
-
     List<Record> genericRecords = dataGenerator.generateRecords();
-
-    try (writer) {
-      genericRecords.forEach(writer::write);
-    }
-
-    DataFile dataFile = writer.toDataFile();
+    DataFile dataFile = writeGenericRecords(fileFormat, schema, genericRecords, countsConfig);
 
     assertThat(dataFile).isNotNull();
     assertThat(dataFile.recordCount()).isEqualTo(genericRecords.size());
@@ -770,19 +715,13 @@ public abstract class BaseFormatModelTests<T> {
     // In the counts mode, valueCounts and nullValueCounts should be present, while lowerBounds and
     // upperBounds should be null.
     assertValueAndNullCounts(
-        schema, genericRecords, dataFile.valueCounts(), dataFile.nullValueCounts());
-    assertBoundsNull(schema, dataFile.lowerBounds(), dataFile.upperBounds());
-
-    TestTables.clearTables();
+        fileFormat, schema, genericRecords, dataFile.valueCounts(), dataFile.nullValueCounts());
+    assertBoundsNull(fileFormat, schema, dataFile.lowerBounds(), dataFile.upperBounds());
   }
 
   @ParameterizedTest
   @FieldSource("FILE_FORMATS")
   void testEqualityDeleteWriterMetricsCollection(FileFormat fileFormat) throws IOException {
-
-    // AVRO Only support metric collection with rowCount
-    assumeSupports(fileFormat, FEATURE_METRIC_COLLECT);
-
     DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
     Schema schema = dataGenerator.schema();
     FileWriterBuilder<EqualityDeleteWriter<Record>, Object> writerBuilder =
@@ -807,71 +746,45 @@ public abstract class BaseFormatModelTests<T> {
     assertThat(deleteFile.recordCount()).isEqualTo(genericRecords.size());
 
     assertValueAndNullCounts(
-        schema, genericRecords, deleteFile.valueCounts(), deleteFile.nullValueCounts());
-    assertBounds(schema, genericRecords, deleteFile.lowerBounds(), deleteFile.upperBounds());
+        fileFormat, schema, genericRecords, deleteFile.valueCounts(), deleteFile.nullValueCounts());
+    assertBounds(
+        fileFormat, schema, genericRecords, deleteFile.lowerBounds(), deleteFile.upperBounds());
   }
 
   @ParameterizedTest
   @FieldSource("FILE_FORMATS")
   void testPositionDeleteWriterMetricsSingleFile(FileFormat fileFormat) throws IOException {
-    Schema positionDeleteSchema = DeleteSchemaUtil.pathPosSchema();
-
-    FileWriterBuilder<PositionDeleteWriter<T>, ?> writerBuilder =
-        FormatModelRegistry.positionDeleteWriteBuilder(fileFormat, encryptedFile);
-
-    // Only reference a single data file, which takes the copyWithoutFieldCounts branch:
-    // counts are removed but bounds are preserved.
+    // Single file reference: counts are removed but bounds are preserved.
     List<PositionDelete<T>> deletes =
         ImmutableList.of(
             PositionDelete.<T>create().set("d-file-1.parquet", 0L),
             PositionDelete.<T>create().set("d-file-1.parquet", 5L),
             PositionDelete.<T>create().set("d-file-1.parquet", 3L));
 
-    List<Record> genericRecords =
-        deletes.stream()
-            .map(
-                d ->
-                    GenericRecord.create(positionDeleteSchema)
-                        .copy(
-                            DELETE_FILE_PATH.name(), d.path(),
-                            DELETE_FILE_POS.name(), d.pos()))
-            .toList();
-
-    PositionDeleteWriter<T> writer = writerBuilder.spec(PartitionSpec.unpartitioned()).build();
-    try (writer) {
-      deletes.forEach(writer::write);
-    }
-
-    DeleteFile deleteFile = writer.toDeleteFile();
-
-    assertThat(deleteFile).isNotNull();
-    assertThat(deleteFile.recordCount()).isEqualTo(deletes.size());
-
-    assumeSupports(fileFormat, FEATURE_METRIC_COLLECT);
-
-    // Single file reference: valueCounts and nullValueCounts for file_path and pos are removed
-    assertCountsNull(positionDeleteSchema, deleteFile.valueCounts(), deleteFile.nullValueCounts());
-    // Single file reference: bounds are preserved
-    assertBounds(
-        positionDeleteSchema, genericRecords, deleteFile.lowerBounds(), deleteFile.upperBounds());
+    writePositionDeletesAndAssertMetrics(fileFormat, deletes, true);
   }
 
   @ParameterizedTest
   @FieldSource("FILE_FORMATS")
   void testPositionDeleteWriterMetricsMultipleFiles(FileFormat fileFormat) throws IOException {
-    Schema positionDeleteSchema = DeleteSchemaUtil.pathPosSchema();
-
-    FileWriterBuilder<PositionDeleteWriter<T>, ?> writerBuilder =
-        FormatModelRegistry.positionDeleteWriteBuilder(fileFormat, encryptedFile);
-
-    // Reference multiple data files, which takes the copyWithoutFieldCountsAndBounds branch:
-    // both counts and bounds are removed.
+    // Multiple file references: both counts and bounds are removed.
     List<PositionDelete<T>> deletes =
         ImmutableList.of(
             PositionDelete.<T>create().set("d-file-1.parquet", 0L),
             PositionDelete.<T>create().set("d-file-1.parquet", 5L),
             PositionDelete.<T>create().set("d-file-2.parquet", 3L));
 
+    writePositionDeletesAndAssertMetrics(fileFormat, deletes, false);
+  }
+
+  private void writePositionDeletesAndAssertMetrics(
+      FileFormat fileFormat, List<PositionDelete<T>> deletes, boolean singleFileReference)
+      throws IOException {
+    Schema positionDeleteSchema = DeleteSchemaUtil.pathPosSchema();
+
+    FileWriterBuilder<PositionDeleteWriter<T>, ?> writerBuilder =
+        FormatModelRegistry.positionDeleteWriteBuilder(fileFormat, encryptedFile);
+
     PositionDeleteWriter<T> writer = writerBuilder.spec(PartitionSpec.unpartitioned()).build();
     try (writer) {
       deletes.forEach(writer::write);
@@ -882,19 +795,36 @@ public abstract class BaseFormatModelTests<T> {
     assertThat(deleteFile).isNotNull();
     assertThat(deleteFile.recordCount()).isEqualTo(deletes.size());
 
-    assumeSupports(fileFormat, FEATURE_METRIC_COLLECT);
+    assertCountsNull(
+        fileFormat, positionDeleteSchema, deleteFile.valueCounts(), deleteFile.nullValueCounts());
 
-    // Multiple file references: all metrics (counts and bounds) for file_path and pos are removed
-    assertCountsNull(positionDeleteSchema, deleteFile.valueCounts(), deleteFile.nullValueCounts());
-    assertBoundsNull(positionDeleteSchema, deleteFile.lowerBounds(), deleteFile.upperBounds());
+    if (singleFileReference) {
+      // Single file reference: bounds are preserved
+      List<Record> genericRecords =
+          deletes.stream()
+              .map(
+                  d ->
+                      GenericRecord.create(positionDeleteSchema)
+                          .copy(
+                              DELETE_FILE_PATH.name(), d.path(),
+                              DELETE_FILE_POS.name(), d.pos()))
+              .toList();
+      assertBounds(
+          fileFormat,
+          positionDeleteSchema,
+          genericRecords,
+          deleteFile.lowerBounds(),
+          deleteFile.upperBounds());
+    } else {
+      // Multiple file references: bounds are also removed
+      assertBoundsNull(
+          fileFormat, positionDeleteSchema, deleteFile.lowerBounds(), deleteFile.upperBounds());
+    }
   }
 
   @ParameterizedTest
   @FieldSource("FILE_FORMATS")
   void testDataWriterMetricsWithPerColumnMode(FileFormat fileFormat) throws IOException {
-    // AVRO Only support metric collection with rowCount
-    assumeSupports(fileFormat, FEATURE_METRIC_COLLECT);
-
     DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
     Schema schema = dataGenerator.schema();
 
@@ -916,47 +846,35 @@ public abstract class BaseFormatModelTests<T> {
 
     MetricsConfig perColumnConfig = MetricsConfig.forTable(table);
 
-    FileWriterBuilder<DataWriter<Record>, Object> writerBuilder =
-        FormatModelRegistry.dataWriteBuilder(fileFormat, Record.class, encryptedFile);
-
-    DataWriter<Record> writer =
-        writerBuilder
-            .schema(schema)
-            .spec(PartitionSpec.unpartitioned())
-            .metricsConfig(perColumnConfig)
-            .build();
-
     List<Record> genericRecords = dataGenerator.generateRecords();
-
-    try (writer) {
-      genericRecords.forEach(writer::write);
-    }
-
-    DataFile dataFile = writer.toDataFile();
+    DataFile dataFile = writeGenericRecords(fileFormat, schema, genericRecords, perColumnConfig);
 
     assertThat(dataFile).isNotNull();
     assertThat(dataFile.recordCount()).isEqualTo(genericRecords.size());
 
     // col_a: mode=none -> no valueCounts, nullValueCounts, bounds
     Schema noneSchema = new Schema(schema.findField("col_a"));
-    assertCountsNull(noneSchema, dataFile.valueCounts(), dataFile.nullValueCounts());
-    assertBoundsNull(noneSchema, dataFile.lowerBounds(), dataFile.upperBounds());
+    assertCountsNull(fileFormat, noneSchema, dataFile.valueCounts(), dataFile.nullValueCounts());
+    assertBoundsNull(fileFormat, noneSchema, dataFile.lowerBounds(), dataFile.upperBounds());
 
     // col_b: mode=full -> valueCounts, nullValueCounts, and bounds all present
     Schema fullSchema = new Schema(schema.findField("col_b"));
     assertValueAndNullCounts(
-        fullSchema, genericRecords, dataFile.valueCounts(), dataFile.nullValueCounts());
-    assertBounds(fullSchema, genericRecords, dataFile.lowerBounds(), dataFile.upperBounds());
+        fileFormat, fullSchema, genericRecords, dataFile.valueCounts(), dataFile.nullValueCounts());
+    assertBounds(
+        fileFormat, fullSchema, genericRecords, dataFile.lowerBounds(), dataFile.upperBounds());
 
     // col_c, col_d, col_e: mode=counts (default) -> valueCounts and nullValueCounts present,
     // but no bounds
     Schema countsSchema =
         new Schema(schema.findField("col_c"), schema.findField("col_d"), schema.findField("col_e"));
     assertValueAndNullCounts(
-        countsSchema, genericRecords, dataFile.valueCounts(), dataFile.nullValueCounts());
-    assertBoundsNull(countsSchema, dataFile.lowerBounds(), dataFile.upperBounds());
-
-    TestTables.clearTables();
+        fileFormat,
+        countsSchema,
+        genericRecords,
+        dataFile.valueCounts(),
+        dataFile.nullValueCounts());
+    assertBoundsNull(fileFormat, countsSchema, dataFile.lowerBounds(), dataFile.upperBounds());
   }
 
   private void readAndAssertGenericRecords(
@@ -973,10 +891,20 @@ public abstract class BaseFormatModelTests<T> {
     DataTestHelpers.assertEquals(schema.asStruct(), expected, readRecords);
   }
 
-  private void writeGenericRecords(FileFormat fileFormat, Schema schema, List<Record> records)
+  private DataFile writeGenericRecords(FileFormat fileFormat, Schema schema, List<Record> records)
+      throws IOException {
+    return writeGenericRecords(fileFormat, schema, records, null);
+  }
+
+  private DataFile writeGenericRecords(
+      FileFormat fileFormat, Schema schema, List<Record> records, MetricsConfig metricsConfig)
       throws IOException {
     FileWriterBuilder<DataWriter<Record>, Object> writerBuilder =
         FormatModelRegistry.dataWriteBuilder(fileFormat, Record.class, encryptedFile);
+
+    if (metricsConfig != null) {
+      writerBuilder.metricsConfig(metricsConfig);
+    }
 
     DataWriter<Record> writer =
         writerBuilder.schema(schema).spec(PartitionSpec.unpartitioned()).build();
@@ -989,6 +917,8 @@ public abstract class BaseFormatModelTests<T> {
     assertThat(dataFile).isNotNull();
     assertThat(dataFile.recordCount()).isEqualTo(records.size());
     assertThat(dataFile.format()).isEqualTo(fileFormat);
+
+    return dataFile;
   }
 
   private List<Record> projectRecords(List<Record> records, Schema projectedSchema) {
@@ -1053,10 +983,12 @@ public abstract class BaseFormatModelTests<T> {
   }
 
   private void assertValueAndNullCounts(
+      FileFormat fileFormat,
       Schema schema,
       List<Record> genericRecords,
       Map<Integer, Long> valueCounts,
       Map<Integer, Long> nullValueCounts) {
+    assumeSupports(fileFormat, FEATURE_COLUMN_LEVEL_METRICS);
     for (Types.NestedField field : schema.columns()) {
       if (field.type().isPrimitiveType()) {
         assertThat(valueCounts).containsKey(field.fieldId());
@@ -1072,10 +1004,12 @@ public abstract class BaseFormatModelTests<T> {
   }
 
   private void assertBounds(
+      FileFormat fileFormat,
       Schema schema,
       List<Record> genericRecords,
       Map<Integer, ByteBuffer> lowerBounds,
       Map<Integer, ByteBuffer> upperBounds) {
+    assumeSupports(fileFormat, FEATURE_COLUMN_LEVEL_METRICS);
     for (Types.NestedField field : schema.columns()) {
       if (field.type().isPrimitiveType()) {
         assertThat(lowerBounds).containsKey(field.fieldId());
@@ -1136,7 +1070,11 @@ public abstract class BaseFormatModelTests<T> {
   }
 
   private void assertBoundsNull(
-      Schema schema, Map<Integer, ByteBuffer> lowerBounds, Map<Integer, ByteBuffer> upperBounds) {
+      FileFormat fileFormat,
+      Schema schema,
+      Map<Integer, ByteBuffer> lowerBounds,
+      Map<Integer, ByteBuffer> upperBounds) {
+    assumeSupports(fileFormat, FEATURE_COLUMN_LEVEL_METRICS);
     for (Types.NestedField field : schema.columns()) {
       if (field.type().isPrimitiveType()) {
         assertThat(lowerBounds == null || lowerBounds.get(field.fieldId()) == null).isTrue();
@@ -1146,7 +1084,11 @@ public abstract class BaseFormatModelTests<T> {
   }
 
   private void assertCountsNull(
-      Schema schema, Map<Integer, Long> valueCounts, Map<Integer, Long> nullValueCounts) {
+      FileFormat fileFormat,
+      Schema schema,
+      Map<Integer, Long> valueCounts,
+      Map<Integer, Long> nullValueCounts) {
+    assumeSupports(fileFormat, FEATURE_COLUMN_LEVEL_METRICS);
     for (Types.NestedField field : schema.columns()) {
       if (field.type().isPrimitiveType()) {
         assertThat(valueCounts == null || valueCounts.get(field.fieldId()) == null).isTrue();
