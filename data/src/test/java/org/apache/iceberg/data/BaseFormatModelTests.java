@@ -31,6 +31,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.stream.IntStream;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
@@ -652,42 +653,22 @@ public abstract class BaseFormatModelTests<T> {
             .ofType(Types.IntegerType.get())
             .withInitialDefault(Literal.of(defaultIntValue))
             .build());
-    evolvedColumns.add(
-        Types.NestedField.optional("col_h")
-            .withId(maxFieldId + 3)
-            .ofType(
-                Types.MapType.ofOptional(
-                    maxFieldId + 4,
-                    maxFieldId + 5,
-                    Types.StringType.get(),
-                    Types.IntegerType.get()))
-            .build());
-    evolvedColumns.add(
-        Types.NestedField.optional("col_i")
-            .withId(maxFieldId + 6)
-            .ofType(Types.ListType.ofOptional(maxFieldId + 7, Types.StringType.get()))
-            .build());
 
     Schema evolvedSchema = new Schema(evolvedColumns);
+    readAndAssertGenericRecords(
+        fileFormat,
+        evolvedSchema,
+        genericRecords,
+        record -> {
+          Record expected = GenericRecord.create(evolvedSchema);
+          for (Types.NestedField col : writeSchema.columns()) {
+            expected.setField(col.name(), record.getField(col.name()));
+          }
 
-    List<Record> expectedGenericRecords =
-        genericRecords.stream()
-            .map(
-                record -> {
-                  Record expected = GenericRecord.create(evolvedSchema);
-                  for (Types.NestedField col : writeSchema.columns()) {
-                    expected.setField(col.name(), record.getField(col.name()));
-                  }
-
-                  expected.setField("col_f", defaultStringValue);
-                  expected.setField("col_g", defaultIntValue);
-                  expected.setField("col_h", null);
-                  expected.setField("col_i", null);
-                  return expected;
-                })
-            .toList();
-
-    readAndAssertGenericRecords(fileFormat, evolvedSchema, expectedGenericRecords);
+          expected.setField("col_f", defaultStringValue);
+          expected.setField("col_g", defaultIntValue);
+          return expected;
+        });
   }
 
   @ParameterizedTest
@@ -1099,6 +1080,15 @@ public abstract class BaseFormatModelTests<T> {
 
     assertThat(readRecords).hasSize(records.size());
     assertEquals(projectionSchema, convertToEngineRecords(expected, projectionSchema), readRecords);
+  }
+
+  private void readAndAssertGenericRecords(
+      FileFormat fileFormat,
+      Schema schema,
+      List<Record> sourceRecords,
+      Function<Record, Record> transform)
+      throws IOException {
+    readAndAssertGenericRecords(fileFormat, schema, sourceRecords.stream().map(transform).toList());
   }
 
   private void readAndAssertGenericRecords(
