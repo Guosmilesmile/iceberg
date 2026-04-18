@@ -25,6 +25,7 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.mapping.NameMapping;
+import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMultimap;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
@@ -515,11 +516,13 @@ public final class ORCSchemaUtil {
     return true;
   }
 
-  static TypeDescription removeIds(TypeDescription type) {
+  @VisibleForTesting
+  public static TypeDescription removeIds(TypeDescription type) {
     return OrcSchemaVisitor.visit(type, new RemoveIds());
   }
 
-  static boolean hasIds(TypeDescription orcSchema) {
+  @VisibleForTesting
+  public static boolean hasIds(TypeDescription orcSchema) {
     return OrcSchemaVisitor.visit(orcSchema, new HasIds());
   }
 

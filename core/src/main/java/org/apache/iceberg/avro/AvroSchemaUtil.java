@@ -90,7 +90,7 @@ public class AvroSchemaUtil {
     return new org.apache.iceberg.Schema(fields);
   }
 
-  static boolean hasIds(Schema schema) {
+  public static boolean hasIds(Schema schema) {
     return AvroCustomOrderSchemaVisitor.visit(schema, new HasIds());
   }
 
