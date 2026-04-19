@@ -30,10 +30,14 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.stream.IntStream;
 import org.apache.avro.file.DataFileStream;
 import org.apache.avro.file.DataFileWriter;
@@ -77,6 +81,7 @@ import org.apache.iceberg.parquet.ParquetSchemaUtil;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Type;
+import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.orc.OrcFile;
 import org.apache.orc.Reader;
@@ -672,18 +677,6 @@ public abstract class BaseFormatModelTests<T> {
             .ofType(Types.IntegerType.get())
             .build());
     Schema readSchema = new Schema(evolvedColumns);
-
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(readSchema)
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
-    assertThat(readRecords).hasSize(genericRecords.size());
-
     List<Record> expectedGenericRecords =
         genericRecords.stream()
             .map(
@@ -699,8 +692,7 @@ public abstract class BaseFormatModelTests<T> {
                 })
             .toList();
 
-    assertEquals(
-        readSchema, convertToEngineRecords(expectedGenericRecords, readSchema), readRecords);
+    readAndAssertEngineRecords(fileFormat, readSchema, expectedGenericRecords);
   }
 
   /**
@@ -721,17 +713,6 @@ public abstract class BaseFormatModelTests<T> {
     Schema projectedSchema =
         new Schema(writeColumns.get(0), writeColumns.get(writeColumns.size() - 1));
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(projectedSchema)
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
-    assertThat(readRecords).hasSize(genericRecords.size());
-
     List<Record> expectedGenericRecords =
         genericRecords.stream()
             .map(
@@ -745,10 +726,7 @@ public abstract class BaseFormatModelTests<T> {
                 })
             .toList();
 
-    assertEquals(
-        projectedSchema,
-        convertToEngineRecords(expectedGenericRecords, projectedSchema),
-        readRecords);
+    readAndAssertEngineRecords(fileFormat, projectedSchema, expectedGenericRecords);
   }
 
   /**
@@ -775,17 +753,6 @@ public abstract class BaseFormatModelTests<T> {
             Types.NestedField.required(4, "col_d", Types.FloatType.get()),
             Types.NestedField.required(5, "col_e", Types.DoubleType.get()));
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(readSchema)
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
-    assertThat(readRecords).hasSize(genericRecords.size());
-
     List<Record> expectedGenericRecords =
         genericRecords.stream()
             .map(
@@ -800,60 +767,62 @@ public abstract class BaseFormatModelTests<T> {
                 })
             .toList();
 
-    assertEquals(
-        readSchema, convertToEngineRecords(expectedGenericRecords, readSchema), readRecords);
+    readAndAssertEngineRecords(fileFormat, readSchema, expectedGenericRecords);
   }
 
-  /**
-   * Schema evolution: Allowed type changes. Write with DefaultSchema (col_b:int, col_d:float), read
-   * with promoted types (col_b:long, col_d:double).
-   */
   @ParameterizedTest
   @FieldSource("FILE_FORMATS")
-  void testSchemaEvolutionTypePromotion(FileFormat fileFormat) throws IOException {
+  void testSchemaEvolutionTypePromotionIntToLong(FileFormat fileFormat) throws IOException {
+    runTypePromotionCheck(
+        fileFormat,
+        Types.IntegerType.get(),
+        Types.LongType.get(),
+        value -> value == null ? null : ((Integer) value).longValue());
+  }
 
-    DataGenerator dataGenerator = new DataGenerators.DefaultSchema();
-    Schema writeSchema = dataGenerator.schema();
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionTypePromotionFloatToDouble(FileFormat fileFormat) throws IOException {
+    runTypePromotionCheck(
+        fileFormat,
+        Types.FloatType.get(),
+        Types.DoubleType.get(),
+        value -> value == null ? null : ((Float) value).doubleValue());
+  }
 
-    List<Record> genericRecords = dataGenerator.generateRecords();
-    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionTypePromotionDecimalPrecision(FileFormat fileFormat) throws IOException {
+    runTypePromotionCheck(
+        fileFormat,
+        Types.DecimalType.of(9, 2),
+        Types.DecimalType.of(18, 2),
+        java.util.function.Function.identity());
+  }
 
-    // Read with promoted types: `col_b` int → long, `col_d` float → double
-    Schema readSchema =
-        new Schema(
-            Types.NestedField.required(1, "col_a", Types.StringType.get()),
-            Types.NestedField.required(2, "col_b", Types.LongType.get()),
-            Types.NestedField.required(3, "col_c", Types.LongType.get()),
-            Types.NestedField.required(4, "col_d", Types.DoubleType.get()),
-            Types.NestedField.required(5, "col_e", Types.DoubleType.get()));
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionTypePromotionDateToTimestamp(FileFormat fileFormat) throws IOException {
+    assumeThat(TypeUtil.isPromotionAllowed(Types.DateType.get(), Types.TimestampType.withoutZone()))
+        .isTrue();
+    runTypePromotionCheck(
+        fileFormat,
+        Types.DateType.get(),
+        Types.TimestampType.withoutZone(),
+        value -> value == null ? null : LocalDateTime.of((LocalDate) value, LocalTime.MIDNIGHT));
+  }
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(readSchema)
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
-    assertThat(readRecords).hasSize(genericRecords.size());
-
-    List<Record> expectedGenericRecords =
-        genericRecords.stream()
-            .map(
-                record -> {
-                  Record expected = GenericRecord.create(readSchema);
-                  expected.setField("col_a", record.getField("col_a"));
-                  expected.setField("col_b", ((Integer) record.getField("col_b")).longValue());
-                  expected.setField("col_c", record.getField("col_c"));
-                  expected.setField("col_d", ((Float) record.getField("col_d")).doubleValue());
-                  expected.setField("col_e", record.getField("col_e"));
-                  return expected;
-                })
-            .toList();
-
-    assertEquals(
-        readSchema, convertToEngineRecords(expectedGenericRecords, readSchema), readRecords);
+  @ParameterizedTest
+  @FieldSource("FILE_FORMATS")
+  void testSchemaEvolutionTypePromotionDateToTimestampNano(FileFormat fileFormat)
+      throws IOException {
+    assumeThat(TypeUtil.isPromotionAllowed(Types.DateType.get(), Types.TimestampType.withoutZone()))
+        .isTrue();
+    runTypePromotionCheck(
+        fileFormat,
+        Types.DateType.get(),
+        Types.TimestampNanoType.withoutZone(),
+        value -> value == null ? null : LocalDateTime.of((LocalDate) value, LocalTime.MIDNIGHT));
   }
 
   /**
@@ -877,17 +846,6 @@ public abstract class BaseFormatModelTests<T> {
             Types.NestedField.required(4, "col_d", Types.FloatType.get()),
             Types.NestedField.required(2, "col_b", Types.IntegerType.get()));
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(reorderedSchema)
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
-    assertThat(readRecords).hasSize(genericRecords.size());
-
     List<Record> expectedGenericRecords =
         genericRecords.stream()
             .map(
@@ -901,10 +859,7 @@ public abstract class BaseFormatModelTests<T> {
                 })
             .toList();
 
-    assertEquals(
-        reorderedSchema,
-        convertToEngineRecords(expectedGenericRecords, reorderedSchema),
-        readRecords);
+    readAndAssertEngineRecords(fileFormat, reorderedSchema, expectedGenericRecords);
   }
 
   /**
@@ -930,17 +885,6 @@ public abstract class BaseFormatModelTests<T> {
             Types.NestedField.required(4, "column_d", Types.FloatType.get()),
             Types.NestedField.required(5, "col_e", Types.DoubleType.get()));
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(renamedSchema)
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
-    assertThat(readRecords).hasSize(genericRecords.size());
-
     List<Record> expectedGenericRecords =
         genericRecords.stream()
             .map(
@@ -955,8 +899,7 @@ public abstract class BaseFormatModelTests<T> {
                 })
             .toList();
 
-    assertEquals(
-        renamedSchema, convertToEngineRecords(expectedGenericRecords, renamedSchema), readRecords);
+    readAndAssertEngineRecords(fileFormat, renamedSchema, expectedGenericRecords);
   }
 
   /**
@@ -982,17 +925,6 @@ public abstract class BaseFormatModelTests<T> {
             Types.NestedField.optional(4, "col_d", Types.FloatType.get()),
             Types.NestedField.required(5, "col_e", Types.DoubleType.get()));
 
-    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
-    List<T> readRecords;
-    try (CloseableIterable<T> reader =
-        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
-            .project(readSchema)
-            .build()) {
-      readRecords = ImmutableList.copyOf(reader);
-    }
-
-    assertThat(readRecords).hasSize(genericRecords.size());
-
     List<Record> expectedGenericRecords =
         genericRecords.stream()
             .map(
@@ -1006,8 +938,7 @@ public abstract class BaseFormatModelTests<T> {
                 })
             .toList();
 
-    assertEquals(
-        readSchema, convertToEngineRecords(expectedGenericRecords, readSchema), readRecords);
+    readAndAssertEngineRecords(fileFormat, readSchema, expectedGenericRecords);
   }
 
   /**
@@ -1275,5 +1206,45 @@ public abstract class BaseFormatModelTests<T> {
     } finally {
       Files.deleteIfExists(tempFile);
     }
+  }
+
+  private void runTypePromotionCheck(
+      FileFormat fileFormat, Type fromType, Type toType, Function<Object, Object> promoteValue)
+      throws IOException {
+    String columnName = "col";
+    Schema writeSchema = new Schema(Types.NestedField.required(1, columnName, fromType));
+    Schema readSchema = new Schema(Types.NestedField.required(1, columnName, toType));
+
+    List<Record> genericRecords = RandomGenericData.generate(writeSchema, 10, 1L);
+    writeGenericRecords(fileFormat, writeSchema, genericRecords);
+
+    List<Record> expectedGenericRecords =
+        genericRecords.stream()
+            .map(
+                record -> {
+                  Record expected = GenericRecord.create(readSchema);
+                  expected.setField(columnName, promoteValue.apply(record.getField(columnName)));
+                  return expected;
+                })
+            .toList();
+
+    readAndAssertEngineRecords(fileFormat, readSchema, expectedGenericRecords);
+  }
+
+  private void readAndAssertEngineRecords(
+      FileFormat fileFormat, Schema readSchema, List<Record> expectedGenericRecords)
+      throws IOException {
+    InputFile inputFile = encryptedFile.encryptingOutputFile().toInputFile();
+    List<T> readRecords;
+    try (CloseableIterable<T> reader =
+        FormatModelRegistry.readBuilder(fileFormat, engineType(), inputFile)
+            .project(readSchema)
+            .build()) {
+      readRecords = ImmutableList.copyOf(reader);
+    }
+
+    assertThat(readRecords).hasSize(expectedGenericRecords.size());
+    assertEquals(
+        readSchema, convertToEngineRecords(expectedGenericRecords, readSchema), readRecords);
   }
 }
