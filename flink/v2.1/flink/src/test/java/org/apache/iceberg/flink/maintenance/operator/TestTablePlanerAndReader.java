@@ -25,8 +25,10 @@ import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.ProcessFunctionTestHarnesses;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.MetadataTableType;
+import org.apache.iceberg.Partitioning;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.flink.maintenance.api.RemoveDanglingDeletes;
 import org.apache.iceberg.flink.maintenance.api.Trigger;
 import org.apache.iceberg.flink.source.ScanContext;
 import org.junit.jupiter.api.Test;
@@ -35,6 +37,64 @@ class TestTablePlanerAndReader extends OperatorTestBase {
   private static final Schema FILE_PATH_SCHEMA = new Schema(DataFile.FILE_PATH);
   private static final ScanContext FILE_PATH_SCAN_CONTEXT =
       ScanContext.builder().streaming(true).project(FILE_PATH_SCHEMA).build();
+
+  @Test
+  void testTablePlaneAndRead1() throws Exception {
+    Table table = createPartitionedTable();
+    Schema projectedSchema = RemoveDanglingDeletes.projectedEntriesSchema(table);
+    ScanContext scanContext = RemoveDanglingDeletes.liveDeleteEntriesScanContext(projectedSchema);
+    insertPartitioned(table, 1, "a");
+    insertPartitioned(table, 2, "b");
+    int partitionFieldCount = Partitioning.partitionType(table).fields().size();
+
+    List<MetadataTablePlanner.SplitInfo> icebergSourceSplits;
+    try (OneInputStreamOperatorTestHarness<Trigger, MetadataTablePlanner.SplitInfo> testHarness =
+        ProcessFunctionTestHarnesses.forProcessFunction(
+            new MetadataTablePlanner(
+                OperatorTestBase.DUMMY_TASK_NAME,
+                0,
+                tableLoader(),
+                scanContext,
+                MetadataTableType.ENTRIES,
+                1))) {
+      testHarness.open();
+      OperatorTestBase.trigger(testHarness);
+      icebergSourceSplits = testHarness.extractOutputValues();
+      assertThat(testHarness.getSideOutput(TaskResultAggregator.ERROR_STREAM)).isNull();
+    }
+
+    try (OneInputStreamOperatorTestHarness<MetadataTablePlanner.SplitInfo, DeleteFileInfo>
+        testHarness =
+            ProcessFunctionTestHarnesses.forProcessFunction(
+                new SequenceNumberPartitionInfoReader(
+                    OperatorTestBase.DUMMY_TASK_NAME,
+                    0,
+                    tableLoader(),
+                    projectedSchema,
+                    scanContext,
+                    MetadataTableType.ENTRIES,
+                    partitionFieldCount))) {
+      testHarness.open();
+      for (MetadataTablePlanner.SplitInfo icebergSourceSplit : icebergSourceSplits) {
+        testHarness.processElement(icebergSourceSplit, System.currentTimeMillis());
+      }
+
+      List<DeleteFileInfo> outputValues = testHarness.extractOutputValues();
+      assertThat(outputValues).hasSize(2);
+      assertThat(outputValues)
+          .allSatisfy(
+              value -> {
+                assertThat(value.partition()).isNotNull();
+                assertThat(value.specId()).isNotNull();
+                assertThat(value.content()).isEqualTo(0);
+                assertThat(value.filePath()).isNotBlank();
+                assertThat(value.fileFormat()).isNotBlank();
+                assertThat(value.recordCount()).isPositive();
+                assertThat(value.fileSizeInBytes()).isPositive();
+              });
+      assertThat(testHarness.getSideOutput(TaskResultAggregator.ERROR_STREAM)).isNull();
+    }
+  }
 
   @Test
   void testTablePlaneAndRead() throws Exception {
