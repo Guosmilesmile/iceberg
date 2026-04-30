@@ -51,6 +51,9 @@ public class TableMaintenanceMetrics {
   public static final String REMOVED_DATA_FILE_NUM_METRIC = "removedDataFileNum";
   public static final String REMOVED_DATA_FILE_SIZE_METRIC = "removedDataFileSize";
 
+  // IncompatibleSchemaChangeBlocker metrics
+  public static final String INCOMPATIBLE_SPEC_CHANGE = "incompatibleSpecChange";
+
   // DataFileRewritePlanner metrics
   public static final String PLANNED_GROUPS_COUNTER = "plannedGroups";
 
