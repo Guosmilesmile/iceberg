@@ -96,9 +96,9 @@ public class RemoveDanglingDeletes {
       Schema entriesSchema = projectedEntriesSchema(table);
       Schema deleteFilesSchema = projectedDeleteFilesSchema(table);
       Schema dataFilesSchema = projectedDataFilesSchema();
-      ScanContext entriesScanContext = liveDeleteEntriesScanContext(entriesSchema);
-      ScanContext deleteFilesScanContext = liveDeleteEntriesScanContext(deleteFilesSchema);
-      ScanContext dataFilesScanContext = liveDeleteEntriesScanContext(dataFilesSchema);
+      ScanContext entriesScanContext = createScanContext(entriesSchema);
+      ScanContext deleteFilesScanContext = createScanContext(deleteFilesSchema);
+      ScanContext dataFilesScanContext = createScanContext(dataFilesSchema);
 
       int partitionFieldCount = Partitioning.partitionType(table).fields().size();
 
@@ -304,7 +304,7 @@ public class RemoveDanglingDeletes {
     }
   }
 
-  public static Schema projectedEntriesSchema(Table table) {
+  static Schema projectedEntriesSchema(Table table) {
     Types.StructType partitionType = Partitioning.partitionType(table);
 
     return new Schema(
@@ -331,11 +331,11 @@ public class RemoveDanglingDeletes {
                 DataFile.CONTENT_SIZE)));
   }
 
-  public static Schema projectedDataFilesSchema() {
+  static Schema projectedDataFilesSchema() {
     return new Schema(DataFile.FILE_PATH);
   }
 
-  public static Schema projectedDeleteFilesSchema(Table table) {
+  static Schema projectedDeleteFilesSchema(Table table) {
     Types.StructType partitionType = Partitioning.partitionType(table);
 
     return new Schema(
@@ -353,7 +353,7 @@ public class RemoveDanglingDeletes {
         DataFile.CONTENT_SIZE);
   }
 
-  public static ScanContext liveDeleteEntriesScanContext(Schema projectedSchema) {
+  static ScanContext createScanContext(Schema projectedSchema) {
     return ScanContext.builder().streaming(true).project(projectedSchema).build();
   }
 

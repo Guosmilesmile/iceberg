@@ -208,6 +208,29 @@ public class OperatorTestBase {
     return createPartitionedTable(2, FileFormat.PARQUET);
   }
 
+  protected static Table createPartitionedTableWithDelete() {
+    return CATALOG_EXTENSION
+        .catalog()
+        .createTable(
+            TestFixtures.TABLE_IDENTIFIER,
+            SCHEMA_WITH_PRIMARY_KEY,
+            PartitionSpec.builderFor(SCHEMA_WITH_PRIMARY_KEY).identity("data").build(),
+            null,
+            ImmutableMap.of("format-version", "2", "write.upsert.enabled", "true"));
+  }
+
+  protected static Table createPartitionedTableWithDelete(int formatVersion) {
+    return CATALOG_EXTENSION
+        .catalog()
+        .createTable(
+            TestFixtures.TABLE_IDENTIFIER,
+            SCHEMA_WITH_PRIMARY_KEY,
+            PartitionSpec.builderFor(SCHEMA_WITH_PRIMARY_KEY).identity("data").build(),
+            null,
+            ImmutableMap.of(
+                "format-version", String.valueOf(formatVersion), "write.upsert.enabled", "true"));
+  }
+
   protected void insert(Table table, Integer id, String data) throws IOException {
     insert(table, id, data, FileFormat.PARQUET);
   }
@@ -267,6 +290,49 @@ public class OperatorTestBase {
     DeleteFile eqDelete = writeEqualityDelete(table, id, oldData);
 
     table.newRowDelta().addRows(dataFile).addDeletes(eqDelete).commit();
+  }
+
+  protected void updatePartitioned(Table table, Integer id, String oldData, String newData)
+      throws IOException {
+    DataFile dataFile =
+        new GenericAppenderHelper(table, FileFormat.PARQUET, warehouseDir)
+            .writeFile(
+                TestHelpers.Row.of(newData),
+                Lists.newArrayList(SimpleDataUtil.createRecord(id, newData)));
+    DeleteFile eqDelete = writeEqualityDelete(table, id, oldData, oldData);
+
+    table.newRowDelta().addRows(dataFile).addDeletes(eqDelete).commit();
+  }
+
+  protected void updatePartitioned(
+      Table table, Integer id, String oldData, String tempData, String newData, int formatVersion)
+      throws IOException {
+    DataFile tempDataFile =
+        new GenericAppenderHelper(table, FileFormat.PARQUET, warehouseDir)
+            .writeFile(
+                TestHelpers.Row.of(tempData),
+                Lists.newArrayList(SimpleDataUtil.createRecord(id, tempData)));
+    DataFile newDataFile =
+        new GenericAppenderHelper(table, FileFormat.PARQUET, warehouseDir)
+            .writeFile(
+                TestHelpers.Row.of(newData),
+                Lists.newArrayList(SimpleDataUtil.createRecord(id, newData)));
+    DeleteFile eqDelete = writeEqualityDelete(table, id, oldData, oldData);
+    DeleteFile posDelete =
+        writePosDelete(table, tempDataFile.path(), 0, id, tempData, tempData, formatVersion);
+
+    table
+        .newRowDelta()
+        .addRows(tempDataFile)
+        .addRows(newDataFile)
+        .addDeletes(eqDelete)
+        .addDeletes(posDelete)
+        .commit();
+  }
+
+  protected void updatePartitioned(
+      Table table, Integer id, String oldData, String tempData, String newData) throws IOException {
+    updatePartitioned(table, id, oldData, tempData, newData, 2);
   }
 
   /**
@@ -445,8 +511,32 @@ public class OperatorTestBase {
         SCHEMA_WITH_PRIMARY_KEY);
   }
 
+  private DeleteFile writeEqualityDelete(
+      Table table, Integer id, String oldData, String partitionValue) throws IOException {
+    File file = File.createTempFile("junit", null, warehouseDir.toFile());
+    assertThat(file.delete()).isTrue();
+    return FileHelpers.writeDeleteFile(
+        table,
+        Files.localOutput(file),
+        TestHelpers.Row.of(partitionValue),
+        Lists.newArrayList(SimpleDataUtil.createRecord(id, oldData)),
+        SCHEMA_WITH_PRIMARY_KEY);
+  }
+
   private DeleteFile writePosDelete(
       Table table, CharSequence path, Integer pos, Integer id, String oldData, int formatVersion)
+      throws IOException {
+    return writePosDelete(table, path, pos, id, oldData, null, formatVersion);
+  }
+
+  private DeleteFile writePosDelete(
+      Table table,
+      CharSequence path,
+      Integer pos,
+      Integer id,
+      String oldData,
+      String partitionValue,
+      int formatVersion)
       throws IOException {
     File file = File.createTempFile("junit", null, warehouseDir.toFile());
     assertThat(file.delete()).isTrue();
@@ -456,7 +546,11 @@ public class OperatorTestBase {
     nested.set(1, oldData);
     posDelete.set(path, pos, nested);
     return FileHelpers.writePosDeleteFile(
-        table, Files.localOutput(file), null, Lists.newArrayList(posDelete), formatVersion);
+        table,
+        Files.localOutput(file),
+        partitionValue == null ? null : TestHelpers.Row.of(partitionValue),
+        Lists.newArrayList(posDelete),
+        formatVersion);
   }
 
   static void trigger(OneInputStreamOperatorTestHarness<Trigger, ?> harness) throws Exception {
