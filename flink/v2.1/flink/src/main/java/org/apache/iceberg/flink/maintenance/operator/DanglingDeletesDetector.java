@@ -21,10 +21,7 @@ package org.apache.iceberg.flink.maintenance.operator;
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.streaming.api.functions.co.KeyedCoProcessFunction;
-import org.apache.flink.table.data.RowData;
 import org.apache.flink.util.Collector;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileContent;
@@ -33,7 +30,7 @@ import org.apache.iceberg.flink.TableLoader;
 
 public class DanglingDeletesDetector
     extends KeyedCoProcessFunction<
-        Tuple2<RowData, Integer>, DeleteFileInfo, DeleteFileInfo, DeleteFile> {
+        DeleteFilePartitionKey, DeleteFileInfo, DeleteFileInfo, DeleteFile> {
 
   private final TableLoader tableLoader;
 
@@ -51,23 +48,21 @@ public class DanglingDeletesDetector
     tableLoader.open();
     this.table = tableLoader.loadTable();
 
+    DeleteFileInfoTypeInformation deleteFileInfoTypeInfo = DeleteFileInfoTypeInformation.of(table);
     deleteEntities =
         getRuntimeContext()
-            .getListState(
-                new ListStateDescriptor<>(
-                    "deleteEntities", TypeInformation.of(DeleteFileInfo.class)));
+            .getListState(new ListStateDescriptor<>("deleteEntities", deleteFileInfoTypeInfo));
 
     minSequenceNumberInfo =
         getRuntimeContext()
             .getListState(
-                new ListStateDescriptor<>(
-                    "minSequenceNumberInfo", TypeInformation.of(DeleteFileInfo.class)));
+                new ListStateDescriptor<>("minSequenceNumberInfo", deleteFileInfoTypeInfo));
   }
 
   @Override
   public void processElement1(
       DeleteFileInfo value,
-      KeyedCoProcessFunction<Tuple2<RowData, Integer>, DeleteFileInfo, DeleteFileInfo, DeleteFile>
+      KeyedCoProcessFunction<DeleteFilePartitionKey, DeleteFileInfo, DeleteFileInfo, DeleteFile>
               .Context
           ctx,
       Collector<DeleteFile> out)
@@ -79,7 +74,7 @@ public class DanglingDeletesDetector
   @Override
   public void processElement2(
       DeleteFileInfo value,
-      KeyedCoProcessFunction<Tuple2<RowData, Integer>, DeleteFileInfo, DeleteFileInfo, DeleteFile>
+      KeyedCoProcessFunction<DeleteFilePartitionKey, DeleteFileInfo, DeleteFileInfo, DeleteFile>
               .Context
           ctx,
       Collector<DeleteFile> out)
@@ -91,7 +86,7 @@ public class DanglingDeletesDetector
   @Override
   public void onTimer(
       long timestamp,
-      KeyedCoProcessFunction<Tuple2<RowData, Integer>, DeleteFileInfo, DeleteFileInfo, DeleteFile>
+      KeyedCoProcessFunction<DeleteFilePartitionKey, DeleteFileInfo, DeleteFileInfo, DeleteFile>
               .OnTimerContext
           ctx,
       Collector<DeleteFile> out)

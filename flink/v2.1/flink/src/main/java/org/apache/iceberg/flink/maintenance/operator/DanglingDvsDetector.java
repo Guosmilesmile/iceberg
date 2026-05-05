@@ -24,7 +24,6 @@ import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.functions.co.KeyedCoProcessFunction;
 import org.apache.flink.util.Collector;
@@ -58,7 +57,7 @@ public class DanglingDvsDetector
         getRuntimeContext()
             .getListState(
                 new ListStateDescriptor<>(
-                    "danglingDvCandidates", TypeInformation.of(DeleteFileInfo.class)));
+                    "danglingDvCandidates", DeleteFileInfoTypeInformation.of(table)));
     this.dataFileExists =
         getRuntimeContext()
             .getState(new ValueStateDescriptor<>("danglingDvDataFileExists", Types.BOOLEAN));

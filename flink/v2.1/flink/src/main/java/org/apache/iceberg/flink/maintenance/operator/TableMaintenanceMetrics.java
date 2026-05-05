@@ -51,6 +51,9 @@ public class TableMaintenanceMetrics {
   public static final String REMOVED_DATA_FILE_NUM_METRIC = "removedDataFileNum";
   public static final String REMOVED_DATA_FILE_SIZE_METRIC = "removedDataFileSize";
 
+  // IncompatibleSchemaChangeBlocker metrics
+  public static final String INCOMPATIBLE_SPEC_CHANGE = "incompatibleSpecChange";
+
   static MetricGroup groupFor(
       RuntimeContext context, String tableName, String taskName, int taskIndex) {
     return groupFor(groupFor(context, tableName), taskName, taskIndex);

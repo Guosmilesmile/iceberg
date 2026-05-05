@@ -18,12 +18,12 @@
  */
 package org.apache.iceberg.flink.maintenance.api;
 
+import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.api.java.functions.KeySelector;
-import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
-import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.util.OutputTag;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileFormat;
@@ -37,9 +37,11 @@ import org.apache.iceberg.flink.maintenance.operator.DanglingDvsDetector;
 import org.apache.iceberg.flink.maintenance.operator.DataFilePathReader;
 import org.apache.iceberg.flink.maintenance.operator.DeleteFileInfo;
 import org.apache.iceberg.flink.maintenance.operator.DeleteFileInfoReader;
+import org.apache.iceberg.flink.maintenance.operator.DeleteFileInfoTypeInformation;
+import org.apache.iceberg.flink.maintenance.operator.DeleteFilePartitionKey;
+import org.apache.iceberg.flink.maintenance.operator.IncompatibleChangeBlocker;
 import org.apache.iceberg.flink.maintenance.operator.MetadataTablePlanner;
 import org.apache.iceberg.flink.maintenance.operator.MinSequenceNumberByPartitionCal;
-import org.apache.iceberg.flink.maintenance.operator.PartitionTableChecker;
 import org.apache.iceberg.flink.maintenance.operator.SequenceNumberPartitionInfoReader;
 import org.apache.iceberg.flink.maintenance.operator.TaskResultAggregator;
 import org.apache.iceberg.flink.source.ScanContext;
@@ -50,7 +52,7 @@ import org.apache.iceberg.util.ThreadPools;
 /** Reads projected rows from the ENTRIES metadata table for dangling delete detection. */
 public class RemoveDanglingDeletes {
 
-  private static final String PARTITION_CHECKER_TASK_NAME = "Partition Table Checker";
+  private static final String SPEC_CHANGE_NAME = "Spec change blocker";
   private static final String PLANNER_TASK_NAME = "Entries Planner";
   private static final String READER_TASK_NAME = "Entries Reader";
   private static final String DELETE_FILES_PLANNER_TASK_NAME = "Delete Files Planner";
@@ -67,6 +69,10 @@ public class RemoveDanglingDeletes {
   private static final String AGGREGATOR_TASK_NAME = "Entries Aggregator";
   private static final String NULL_DV_KEY = "__NULL_DV_KEY__";
 
+  @Internal
+  public static final OutputTag<Exception> ERROR_STREAM =
+      new OutputTag<>("error-stream", TypeInformation.of(Exception.class));
+
   private RemoveDanglingDeletes() {}
 
   /** Creates the builder for creating a stream which reads rows from the ENTRIES table. */
@@ -76,6 +82,7 @@ public class RemoveDanglingDeletes {
 
   public static class Builder extends MaintenanceTaskBuilder<Builder> {
     private int planningWorkerPoolSize = ThreadPools.WORKER_THREAD_POOL_SIZE;
+    private boolean failOnSchemaChange;
 
     @Override
     String maintenanceTaskName() {
@@ -87,12 +94,30 @@ public class RemoveDanglingDeletes {
       return this;
     }
 
+    /**
+     * If there is a spec change on the table, then the partition info in task becomes invalid. If
+     * failOnSpecChange is set to <code>true</code>, then the job will stop with {@link
+     * org.apache.flink.runtime.execution.SuppressRestartsException} to prevent job restarts. If
+     * failOnSpecChange is set to <code>false</code>, then the job will continue to run but the job
+     * will stop working.
+     *
+     * @param newFailOnSpecChange to stop the job on table spec change
+     * @return for chained calls
+     */
+    public Builder failOnSpecChange(boolean newFailOnSpecChange) {
+      this.failOnSchemaChange = newFailOnSpecChange;
+      return this;
+    }
+
     @Override
     DataStream<TaskResult> append(DataStream<Trigger> trigger) {
       Preconditions.checkNotNull(tableLoader(), "TableLoader should not be null");
 
       tableLoader().open();
       Table table = tableLoader().loadTable();
+      TypeInformation<DeleteFileInfo> deleteFileInfoTypeInfo =
+          DeleteFileInfoTypeInformation.of(table);
+      RowType deleteFilePartitionRowType = DeleteFilePartitionKey.partitionRowType(table);
       Schema entriesSchema = projectedEntriesSchema(table);
       Schema deleteFilesSchema = projectedDeleteFilesSchema(table);
       Schema dataFilesSchema = projectedDataFilesSchema();
@@ -104,9 +129,13 @@ public class RemoveDanglingDeletes {
 
       SingleOutputStreamOperator<Trigger> partitionedTrigger =
           trigger
-              .process(new PartitionTableChecker(tableLoader()))
-              .name(operatorName(PARTITION_CHECKER_TASK_NAME))
-              .uid(PARTITION_CHECKER_TASK_NAME + uidSuffix())
+              .transform(
+                  operatorName(SPEC_CHANGE_NAME),
+                  TypeInformation.of(Trigger.class),
+                  new IncompatibleChangeBlocker(
+                      taskName(), index(), tableLoader(), failOnSchemaChange))
+              .name(operatorName(SPEC_CHANGE_NAME))
+              .uid(SPEC_CHANGE_NAME + uidSuffix())
               .slotSharingGroup(slotSharingGroup())
               .forceNonParallel();
 
@@ -138,6 +167,7 @@ public class RemoveDanglingDeletes {
                       entriesScanContext,
                       MetadataTableType.ENTRIES,
                       partitionFieldCount))
+              .returns(deleteFileInfoTypeInfo)
               .name(operatorName(READER_TASK_NAME))
               .uid(READER_TASK_NAME + uidSuffix())
               .slotSharingGroup(slotSharingGroup())
@@ -151,10 +181,9 @@ public class RemoveDanglingDeletes {
                           && value.content() != null
                           && value.content() == 0
                           && value.status() < 2)
-              .keyBy(
-                  (KeySelector<DeleteFileInfo, Tuple2<RowData, Integer>>)
-                      value -> Tuple2.of(value.partition(), value.specId()))
-              .process(new MinSequenceNumberByPartitionCal())
+              .keyBy(DeleteFilePartitionKey.selector(deleteFilePartitionRowType))
+              .process(new MinSequenceNumberByPartitionCal(deleteFilePartitionRowType))
+              .returns(deleteFileInfoTypeInfo)
               .name(operatorName(MIN_SEQUENCE_NUMBER_BY_PARTITION_TASK_NAME))
               .uid("min-sequence-number-by-partition" + uidSuffix())
               .slotSharingGroup(slotSharingGroup())
@@ -175,10 +204,10 @@ public class RemoveDanglingDeletes {
 
       SingleOutputStreamOperator<DeleteFile> danglingDeletes =
           deleteEntries
-              .keyBy(value -> Tuple2.of(value.partition(), value.specId()))
+              .keyBy(DeleteFilePartitionKey.selector(deleteFilePartitionRowType))
               .connect(
                   minSequenceNumberByPartition.keyBy(
-                      value -> Tuple2.of(value.partition(), value.specId())))
+                      DeleteFilePartitionKey.selector(deleteFilePartitionRowType)))
               .process(new DanglingDeletesDetector(tableLoader()))
               .name(operatorName(DANGLING_DELETES_DETECTOR_TASK_NAME))
               .uid("dangling-deletes-detector" + uidSuffix())
@@ -213,6 +242,7 @@ public class RemoveDanglingDeletes {
                       deleteFilesScanContext,
                       MetadataTableType.DELETE_FILES,
                       partitionFieldCount))
+              .returns(deleteFileInfoTypeInfo)
               .name(operatorName(DELETE_FILES_READER_TASK_NAME))
               .uid(DELETE_FILES_READER_TASK_NAME + uidSuffix())
               .slotSharingGroup(slotSharingGroup())
@@ -283,13 +313,13 @@ public class RemoveDanglingDeletes {
 
       DataStream<Exception> errorStream =
           entrySplits
-              .getSideOutput(DeleteOrphanFiles.ERROR_STREAM)
+              .getSideOutput(ERROR_STREAM)
               .union(
-                  deleteFileSplits.getSideOutput(DeleteOrphanFiles.ERROR_STREAM),
-                  dataFileSplits.getSideOutput(DeleteOrphanFiles.ERROR_STREAM),
-                  entriesDataStream.getSideOutput(DeleteOrphanFiles.ERROR_STREAM),
-                  deleteFilesDataStream.getSideOutput(DeleteOrphanFiles.ERROR_STREAM),
-                  dataFilesDataStream.getSideOutput(DeleteOrphanFiles.ERROR_STREAM));
+                  deleteFileSplits.getSideOutput(ERROR_STREAM),
+                  dataFileSplits.getSideOutput(ERROR_STREAM),
+                  entriesDataStream.getSideOutput(ERROR_STREAM),
+                  deleteFilesDataStream.getSideOutput(ERROR_STREAM),
+                  dataFilesDataStream.getSideOutput(ERROR_STREAM));
 
       return trigger
           .union(committed)

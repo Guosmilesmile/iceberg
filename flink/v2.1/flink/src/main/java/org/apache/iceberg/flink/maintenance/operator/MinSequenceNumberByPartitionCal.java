@@ -18,21 +18,32 @@
  */
 package org.apache.iceberg.flink.maintenance.operator;
 
+import org.apache.curator.shaded.com.google.common.base.Preconditions;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
-import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
+import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.util.Collector;
 
 @Internal
 public class MinSequenceNumberByPartitionCal
-    extends KeyedProcessFunction<Tuple2<RowData, Integer>, DeleteFileInfo, DeleteFileInfo> {
+    extends KeyedProcessFunction<DeleteFilePartitionKey, DeleteFileInfo, DeleteFileInfo> {
+
+  private final RowType partitionRowType;
 
   private transient ValueState<Long> minSequenceNumber;
+  private transient TypeSerializer<RowData> partitionSerializer;
+
+  public MinSequenceNumberByPartitionCal(RowType partitionRowType) {
+    this.partitionRowType =
+        Preconditions.checkNotNull(partitionRowType, "Partition row type is null");
+  }
 
   @Override
   public void open(OpenContext openContext) throws Exception {
@@ -41,12 +52,10 @@ public class MinSequenceNumberByPartitionCal
         getRuntimeContext().getState(new ValueStateDescriptor<>("minSequenceNumber", Types.LONG));
   }
 
-  public MinSequenceNumberByPartitionCal() {}
-
   @Override
   public void processElement(
       DeleteFileInfo value,
-      KeyedProcessFunction<Tuple2<RowData, Integer>, DeleteFileInfo, DeleteFileInfo>.Context ctx,
+      KeyedProcessFunction<DeleteFilePartitionKey, DeleteFileInfo, DeleteFileInfo>.Context ctx,
       Collector<DeleteFileInfo> out)
       throws Exception {
     Long currentMinSequenceNumber = minSequenceNumber.value();
@@ -60,14 +69,25 @@ public class MinSequenceNumberByPartitionCal
   @Override
   public void onTimer(
       long timestamp,
-      KeyedProcessFunction<Tuple2<RowData, Integer>, DeleteFileInfo, DeleteFileInfo>.OnTimerContext
+      KeyedProcessFunction<DeleteFilePartitionKey, DeleteFileInfo, DeleteFileInfo>.OnTimerContext
           ctx,
       Collector<DeleteFileInfo> out)
       throws Exception {
     super.onTimer(timestamp, ctx, out);
+    DeleteFilePartitionKey currentKey = ctx.getCurrentKey();
     out.collect(
         new DeleteFileInfo(
-            ctx.getCurrentKey().f0, ctx.getCurrentKey().f1, minSequenceNumber.value()));
+            currentKey.partition(partitionSerializer()),
+            currentKey.specId(),
+            minSequenceNumber.value()));
     minSequenceNumber.clear();
+  }
+
+  private TypeSerializer<RowData> partitionSerializer() {
+    if (partitionSerializer == null) {
+      this.partitionSerializer = new RowDataSerializer(partitionRowType);
+    }
+
+    return partitionSerializer;
   }
 }

@@ -189,7 +189,7 @@ class TestTablePlanerAndReader extends OperatorTestBase {
   }
 
   @Test
-  void testDataFilePlaneAndRead() throws Exception {
+  void testDataFilePathPlaneAndRead() throws Exception {
     Table table = createPartitionedTableWithDelete();
     Schema dataFilesSchema = TestRemoveDanglingDeleteUtil.projectedDataFilesSchema();
     ScanContext dataFilesScanContext =
