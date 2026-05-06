@@ -19,7 +19,6 @@
 package org.apache.iceberg.flink.maintenance.operator;
 
 import java.io.IOException;
-import java.io.Serializable;
 import java.util.Base64;
 import java.util.Objects;
 import org.apache.flink.annotation.Internal;
@@ -37,13 +36,10 @@ import org.apache.iceberg.flink.FlinkSchemaUtil;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 
 @Internal
-public class DeleteFilePartitionKey implements Serializable {
-  private static final long serialVersionUID = 1L;
+public class DeleteFilePartitionKey{
 
-  private Integer specId;
-  private String serializedPartition;
-
-  public DeleteFilePartitionKey() {}
+  private final Integer specId;
+  private final String serializedPartition;
 
   DeleteFilePartitionKey(Integer specId, String serializedPartition) {
     this.specId = specId;
@@ -71,24 +67,8 @@ public class DeleteFilePartitionKey implements Serializable {
     return specId;
   }
 
-  public Integer getSpecId() {
-    return specId;
-  }
-
-  public void setSpecId(Integer specId) {
-    this.specId = specId;
-  }
-
   public String serializedPartition() {
     return serializedPartition;
-  }
-
-  public String getSerializedPartition() {
-    return serializedPartition;
-  }
-
-  public void setSerializedPartition(String serializedPartition) {
-    this.serializedPartition = serializedPartition;
   }
 
   public RowData partition(TypeSerializer<RowData> partitionSerializer) throws IOException {
@@ -132,8 +112,6 @@ public class DeleteFilePartitionKey implements Serializable {
   }
 
   private static class Selector implements KeySelector<DeleteFileInfo, DeleteFilePartitionKey> {
-    private static final long serialVersionUID = 1L;
-
     private final RowType partitionRowType;
 
     private transient TypeSerializer<RowData> partitionSerializer;

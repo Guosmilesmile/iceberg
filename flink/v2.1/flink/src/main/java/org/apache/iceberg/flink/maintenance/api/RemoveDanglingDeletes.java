@@ -113,7 +113,10 @@ public class RemoveDanglingDeletes {
     DataStream<TaskResult> append(DataStream<Trigger> trigger) {
       Preconditions.checkNotNull(tableLoader(), "TableLoader should not be null");
 
-      tableLoader().open();
+      if(!tableLoader().isOpen()){
+        tableLoader().open();
+      }
+
       Table table = tableLoader().loadTable();
       TypeInformation<DeleteFileInfo> deleteFileInfoTypeInfo =
           DeleteFileInfoTypeInformation.of(table);
