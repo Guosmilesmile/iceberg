@@ -32,7 +32,7 @@ import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.util.Collector;
 
 @Internal
-public class MinSequenceNumberByPartitionCal
+public class MinSequenceNumberByPartitionCalculate
     extends KeyedProcessFunction<DeleteFilePartitionKey, DeleteFileInfo, DeleteFileInfo> {
 
   private final RowType partitionRowType;
@@ -40,7 +40,7 @@ public class MinSequenceNumberByPartitionCal
   private transient ValueState<Long> minSequenceNumber;
   private transient TypeSerializer<RowData> partitionSerializer;
 
-  public MinSequenceNumberByPartitionCal(RowType partitionRowType) {
+  public MinSequenceNumberByPartitionCalculate(RowType partitionRowType) {
     this.partitionRowType =
         Preconditions.checkNotNull(partitionRowType, "Partition row type is null");
   }

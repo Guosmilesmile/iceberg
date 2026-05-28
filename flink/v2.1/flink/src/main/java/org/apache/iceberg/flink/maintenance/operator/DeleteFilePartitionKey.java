@@ -36,7 +36,7 @@ import org.apache.iceberg.flink.FlinkSchemaUtil;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 
 @Internal
-public class DeleteFilePartitionKey{
+public class DeleteFilePartitionKey {
 
   private final Integer specId;
   private final String serializedPartition;

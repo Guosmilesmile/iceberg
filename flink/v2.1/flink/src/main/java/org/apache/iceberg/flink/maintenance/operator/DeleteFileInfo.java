@@ -66,24 +66,6 @@ public class DeleteFileInfo implements Serializable {
   }
 
   public DeleteFileInfo(
-      RowData partition, Integer specId, Long sequenceNumber, Integer content, Integer status) {
-    this(
-        partition,
-        specId,
-        sequenceNumber,
-        content,
-        status,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
-  }
-
-  public DeleteFileInfo(
       RowData partition,
       Integer specId,
       Long sequenceNumber,

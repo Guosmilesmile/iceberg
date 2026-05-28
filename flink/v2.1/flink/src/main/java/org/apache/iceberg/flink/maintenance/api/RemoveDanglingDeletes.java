@@ -41,7 +41,7 @@ import org.apache.iceberg.flink.maintenance.operator.DeleteFileInfoTypeInformati
 import org.apache.iceberg.flink.maintenance.operator.DeleteFilePartitionKey;
 import org.apache.iceberg.flink.maintenance.operator.IncompatibleChangeBlocker;
 import org.apache.iceberg.flink.maintenance.operator.MetadataTablePlanner;
-import org.apache.iceberg.flink.maintenance.operator.MinSequenceNumberByPartitionCal;
+import org.apache.iceberg.flink.maintenance.operator.MinSequenceNumberByPartitionCalculate;
 import org.apache.iceberg.flink.maintenance.operator.SequenceNumberPartitionInfoReader;
 import org.apache.iceberg.flink.maintenance.operator.TaskResultAggregator;
 import org.apache.iceberg.flink.source.ScanContext;
@@ -49,7 +49,23 @@ import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.ThreadPools;
 
-/** Reads projected rows from the ENTRIES metadata table for dangling delete detection. */
+/**
+ * Reads projected rows from the ENTRIES metadata table for dangling delete detection.
+ *
+ * <p>First scans the ENTRIES metadata table to find all live data files, groups them by partition
+ * and spec_id, and calculates the minimum sequence_number for each group as
+ * min_data_sequence_number. Then it scans the live delete files and left-joins them with the
+ * grouped data-file result using the same partition and spec_id. A delete file is considered
+ * dangling if: There is no live data file in the same partition: min_data_sequence_number IS NULL.
+ * It is a position delete file and its sequence_number is smaller than the minimum data sequence
+ * number in that partition. It is an equality delete file and its sequence_number is smaller than
+ * or equal to the minimum data sequence number in that partition
+ *
+ * <p>In addition, the action checks Puffin-format deletion vectors. If a deletion vector references
+ * a data file path that no longer exists in the current live data files, it is also treated as
+ * dangling. Finally, all identified dangling delete files are passed to RewriteFiles.deleteFile,
+ * and the rewrite is committed to remove them from the current snapshot.
+ */
 public class RemoveDanglingDeletes {
 
   private static final String SPEC_CHANGE_NAME = "Spec change blocker";
@@ -113,7 +129,7 @@ public class RemoveDanglingDeletes {
     DataStream<TaskResult> append(DataStream<Trigger> trigger) {
       Preconditions.checkNotNull(tableLoader(), "TableLoader should not be null");
 
-      if(!tableLoader().isOpen()){
+      if (!tableLoader().isOpen()) {
         tableLoader().open();
       }
 
@@ -185,7 +201,7 @@ public class RemoveDanglingDeletes {
                           && value.content() == 0
                           && value.status() < 2)
               .keyBy(DeleteFilePartitionKey.selector(deleteFilePartitionRowType))
-              .process(new MinSequenceNumberByPartitionCal(deleteFilePartitionRowType))
+              .process(new MinSequenceNumberByPartitionCalculate(deleteFilePartitionRowType))
               .returns(deleteFileInfoTypeInfo)
               .name(operatorName(MIN_SEQUENCE_NUMBER_BY_PARTITION_TASK_NAME))
               .uid("min-sequence-number-by-partition" + uidSuffix())

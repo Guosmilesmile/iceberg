@@ -76,6 +76,7 @@ public class DanglingDeletesCommitter extends AbstractStreamOperator<Trigger>
 
     if (!danglingDeletes.isEmpty()) {
       rewriteFiles.commit();
+      deleteFiles.clear();
     }
 
     super.processWatermark(mark);
