@@ -92,6 +92,29 @@ SELECT * FROM table /*+ OPTIONS('tag'='t1') */;
 SELECT * FROM table /*+ OPTIONS('streaming'='true', 'monitor-interval'='1s', 'start-tag'='t1', 'end-tag'='t2') */;
 ```
 
+### Lookup Join
+
+Iceberg supports Flink lookup join, which enriches a stream with data from an Iceberg dimension table:
+
+```sql
+SET table.dynamic-table-options.enabled=true;
+
+SELECT o.order_id, o.user_id, u.name, u.city
+FROM orders AS o
+LEFT JOIN iceberg_catalog.db.user_dim
+  /*+ OPTIONS('lookup.cache'='PARTIAL', 'lookup.partial-cache.max-rows'='1000') */
+  FOR SYSTEM_TIME AS OF o.proc_time AS u
+  ON o.user_id = u.user_id;
+```
+
+The lookup behavior is controlled by the Flink built-in `lookup.cache` option:
+
+| `lookup.cache`     | Behavior                                                                                                                                                                           |
+|--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `NONE` (default)   | Each lookup key scans the Iceberg table with predicate pushdown; results are not cached.                                                                                           |
+| `PARTIAL`          | Each lookup key scans the table and its result is cached per key (see `lookup.partial-cache.*`).                                                                                   |
+| `FULL`             | The whole table is lazily loaded into an in-memory map on first lookup; subsequent lookups hit the in-memory map. A background thread can reload it periodically (see `lookup.full-cache.periodic-reload.interval`). |
+
 ## Reading with DataStream
 
 Iceberg support streaming or batch read in Java API now.
