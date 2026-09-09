@@ -32,6 +32,7 @@ import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.ManifestFile;
 import org.apache.iceberg.ReplacePartitions;
 import org.apache.iceberg.RowDelta;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SnapshotUpdate;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.flink.TableLoader;
@@ -79,6 +80,7 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
   private ExecutorService workerPool;
   private int continuousEmptyCheckpoints = 0;
   private final boolean tableMaintenanceEnabled;
+  private final boolean dvOnlyMode;
   private final int subtaskId;
 
   IcebergCommitter(
@@ -91,12 +93,37 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
       IcebergFilesCommitterMetrics committerMetrics,
       boolean tableMaintenanceEnabled,
       int subtaskId) {
+    this(
+        tableLoader,
+        branch,
+        snapshotProperties,
+        replacePartitions,
+        workerPoolSize,
+        sinkId,
+        committerMetrics,
+        tableMaintenanceEnabled,
+        false,
+        subtaskId);
+  }
+
+  IcebergCommitter(
+      TableLoader tableLoader,
+      String branch,
+      Map<String, String> snapshotProperties,
+      boolean replacePartitions,
+      int workerPoolSize,
+      String sinkId,
+      IcebergFilesCommitterMetrics committerMetrics,
+      boolean tableMaintenanceEnabled,
+      boolean dvOnlyMode,
+      int subtaskId) {
     this.branch = branch;
     this.snapshotProperties = snapshotProperties;
     this.replacePartitions = replacePartitions;
     this.committerMetrics = committerMetrics;
     this.tableLoader = tableLoader;
     this.tableMaintenanceEnabled = tableMaintenanceEnabled;
+    this.dvOnlyMode = dvOnlyMode;
     this.subtaskId = subtaskId;
 
     // IcebergSink#addPreCommitTopology routes all committables to subtask 0 via a .global()
@@ -286,12 +313,42 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
 
         Arrays.stream(result.dataFiles()).forEach(rowDelta::addRows);
         Arrays.stream(result.deleteFiles()).forEach(rowDelta::addDeletes);
+        // Deletion vectors that the new ones above supersede. A data file may carry at most one
+        // deletion vector, so the previous one has to go in the same commit.
+        Arrays.stream(result.rewrittenDeleteFiles()).forEach(rowDelta::removeDeletes);
+        validateReferencedDataFiles(rowDelta, result);
 
         String description = "rowDelta";
         logCommitSummary(summary, description);
         commitOperation(rowDelta, description, newFlinkJobId, operatorId, e.getKey());
       }
     }
+  }
+
+  /**
+   * Fails the commit when a concurrent operation removed a data file that the deletion vectors
+   * being committed point at.
+   *
+   * <p>Only needed when the sink resolves equality deletes itself, because then a deletion vector
+   * may reference a data file added by an earlier commit, which a rewrite is free to replace.
+   * Everywhere else the referenced data files are added by the very same commit, so nothing can
+   * have removed them.
+   */
+  private void validateReferencedDataFiles(RowDelta rowDelta, WriteResult result) {
+    if (!dvOnlyMode || result.referencedDataFiles().length == 0) {
+      return;
+    }
+
+    Snapshot snapshot = table.snapshot(branch);
+    if (snapshot == null) {
+      return;
+    }
+
+    // Anything committed from here on is a concurrent operation. Iceberg re-runs the validation
+    // against a refreshed table on every commit attempt, so a rewrite landing in the meantime
+    // fails this commit instead of leaving a deletion vector pointing at a file that is gone.
+    rowDelta.validateFromSnapshot(snapshot.snapshotId());
+    rowDelta.validateDataFilesExist(Arrays.asList(result.referencedDataFiles()));
   }
 
   private void commitOperation(

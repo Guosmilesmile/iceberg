@@ -33,13 +33,14 @@ import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 public class DeltaManifestsSerializer implements SimpleVersionedSerializer<DeltaManifests> {
   private static final int VERSION_1 = 1;
   private static final int VERSION_2 = 2;
+  private static final int VERSION_3 = 3;
   private static final byte[] EMPTY_BINARY = new byte[0];
 
   public static final DeltaManifestsSerializer INSTANCE = new DeltaManifestsSerializer();
 
   @Override
   public int getVersion() {
-    return VERSION_2;
+    return VERSION_3;
   }
 
   @Override
@@ -50,27 +51,16 @@ public class DeltaManifestsSerializer implements SimpleVersionedSerializer<Delta
     ByteArrayOutputStream binaryOut = new ByteArrayOutputStream();
     DataOutputStream out = new DataOutputStream(binaryOut);
 
-    byte[] dataManifestBinary = EMPTY_BINARY;
-    if (deltaManifests.dataManifest() != null) {
-      dataManifestBinary = ManifestFiles.encode(deltaManifests.dataManifest());
-    }
-
-    out.writeInt(dataManifestBinary.length);
-    out.write(dataManifestBinary);
-
-    byte[] deleteManifestBinary = EMPTY_BINARY;
-    if (deltaManifests.deleteManifest() != null) {
-      deleteManifestBinary = ManifestFiles.encode(deltaManifests.deleteManifest());
-    }
-
-    out.writeInt(deleteManifestBinary.length);
-    out.write(deleteManifestBinary);
+    writeManifest(out, deltaManifests.dataManifest());
+    writeManifest(out, deltaManifests.deleteManifest());
 
     CharSequence[] referencedDataFiles = deltaManifests.referencedDataFiles();
     out.writeInt(referencedDataFiles.length);
     for (CharSequence referencedDataFile : referencedDataFiles) {
       out.writeUTF(referencedDataFile.toString());
     }
+
+    writeManifest(out, deltaManifests.rewrittenDeleteManifest());
 
     return binaryOut.toByteArray();
   }
@@ -79,8 +69,8 @@ public class DeltaManifestsSerializer implements SimpleVersionedSerializer<Delta
   public DeltaManifests deserialize(int version, byte[] serialized) throws IOException {
     if (version == VERSION_1) {
       return deserializeV1(serialized);
-    } else if (version == VERSION_2) {
-      return deserializeV2(serialized);
+    } else if (version == VERSION_2 || version == VERSION_3) {
+      return deserializeV2AndAbove(version, serialized);
     } else {
       throw new RuntimeException("Unknown serialize version: " + version);
     }
@@ -90,28 +80,12 @@ public class DeltaManifestsSerializer implements SimpleVersionedSerializer<Delta
     return new DeltaManifests(ManifestFiles.decode(serialized), null);
   }
 
-  private DeltaManifests deserializeV2(byte[] serialized) throws IOException {
-    ManifestFile dataManifest = null;
-    ManifestFile deleteManifest = null;
-
+  private DeltaManifests deserializeV2AndAbove(int version, byte[] serialized) throws IOException {
     ByteArrayInputStream binaryIn = new ByteArrayInputStream(serialized);
     DataInputStream in = new DataInputStream(binaryIn);
 
-    int dataManifestSize = in.readInt();
-    if (dataManifestSize > 0) {
-      byte[] dataManifestBinary = new byte[dataManifestSize];
-      Preconditions.checkState(in.read(dataManifestBinary) == dataManifestSize);
-
-      dataManifest = ManifestFiles.decode(dataManifestBinary);
-    }
-
-    int deleteManifestSize = in.readInt();
-    if (deleteManifestSize > 0) {
-      byte[] deleteManifestBinary = new byte[deleteManifestSize];
-      Preconditions.checkState(in.read(deleteManifestBinary) == deleteManifestSize);
-
-      deleteManifest = ManifestFiles.decode(deleteManifestBinary);
-    }
+    ManifestFile dataManifest = readManifest(in);
+    ManifestFile deleteManifest = readManifest(in);
 
     int referenceDataFileNum = in.readInt();
     CharSequence[] referencedDataFiles = new CharSequence[referenceDataFileNum];
@@ -119,6 +93,28 @@ public class DeltaManifestsSerializer implements SimpleVersionedSerializer<Delta
       referencedDataFiles[i] = in.readUTF();
     }
 
-    return new DeltaManifests(dataManifest, deleteManifest, referencedDataFiles);
+    // Version 2 has no rewritten delete manifest, which only the DV-only write path produces.
+    ManifestFile rewrittenDeleteManifest = version >= VERSION_3 ? readManifest(in) : null;
+
+    return new DeltaManifests(
+        dataManifest, deleteManifest, rewrittenDeleteManifest, referencedDataFiles);
+  }
+
+  private static void writeManifest(DataOutputStream out, ManifestFile manifest)
+      throws IOException {
+    byte[] binary = manifest != null ? ManifestFiles.encode(manifest) : EMPTY_BINARY;
+    out.writeInt(binary.length);
+    out.write(binary);
+  }
+
+  private static ManifestFile readManifest(DataInputStream in) throws IOException {
+    int size = in.readInt();
+    if (size <= 0) {
+      return null;
+    }
+
+    byte[] binary = new byte[size];
+    Preconditions.checkState(in.read(binary) == size);
+    return ManifestFiles.decode(binary);
   }
 }

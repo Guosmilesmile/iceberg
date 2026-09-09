@@ -39,13 +39,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Operator which aggregates the individual {@link WriteResult} objects) to a single {@link
+ * Operator which aggregates the individual {@link SinkWriteResult} objects) to a single {@link
  * IcebergCommittable} per checkpoint (storing the serialized {@link
  * org.apache.iceberg.flink.sink.DeltaManifests}, jobId, operatorId, checkpointId)
  */
 class IcebergWriteAggregator extends AbstractStreamOperator<CommittableMessage<IcebergCommittable>>
     implements OneInputStreamOperator<
-        CommittableMessage<WriteResult>, CommittableMessage<IcebergCommittable>> {
+        CommittableMessage<SinkWriteResult>, CommittableMessage<IcebergCommittable>> {
 
   private static final Logger LOG = LoggerFactory.getLogger(IcebergWriteAggregator.class);
   private static final byte[] EMPTY_MANIFEST_DATA = new byte[0];
@@ -145,11 +145,14 @@ class IcebergWriteAggregator extends AbstractStreamOperator<CommittableMessage<I
   }
 
   @Override
-  public void processElement(StreamRecord<CommittableMessage<WriteResult>> element)
+  public void processElement(StreamRecord<CommittableMessage<SinkWriteResult>> element)
       throws Exception {
 
     if (element.isRecord() && element.getValue() instanceof CommittableWithLineage) {
-      results.add(((CommittableWithLineage<WriteResult>) element.getValue()).getCommittable());
+      results.add(
+          ((CommittableWithLineage<SinkWriteResult>) element.getValue())
+              .getCommittable()
+              .writeResult());
     }
   }
 }

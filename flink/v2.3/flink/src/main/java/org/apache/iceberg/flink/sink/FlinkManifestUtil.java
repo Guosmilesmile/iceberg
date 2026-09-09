@@ -104,6 +104,7 @@ public class FlinkManifestUtil {
 
     ManifestFile dataManifest = null;
     ManifestFile deleteManifest = null;
+    ManifestFile rewrittenDeleteManifest = null;
 
     // Write the completed data files into a newly created data manifest file.
     if (result.dataFiles() != null && result.dataFiles().length > 0) {
@@ -117,21 +118,40 @@ public class FlinkManifestUtil {
 
     // Write the completed delete files into a newly created delete manifest file.
     if (result.deleteFiles() != null && result.deleteFiles().length > 0) {
-      OutputFile deleteManifestFile = outputFileSupplier.get();
-
-      ManifestWriter<DeleteFile> deleteManifestWriter =
-          ManifestFiles.writeDeleteManifest(
-              formatVersion, spec, deleteManifestFile, DUMMY_SNAPSHOT_ID);
-      try (ManifestWriter<DeleteFile> writer = deleteManifestWriter) {
-        for (DeleteFile deleteFile : result.deleteFiles()) {
-          writer.add(deleteFile);
-        }
-      }
-
-      deleteManifest = deleteManifestWriter.toManifestFile();
+      deleteManifest =
+          writeDeleteFiles(
+              outputFileSupplier.get(),
+              spec,
+              Lists.newArrayList(result.deleteFiles()),
+              formatVersion);
     }
 
-    return new DeltaManifests(dataManifest, deleteManifest, result.referencedDataFiles());
+    // Delete files superseded by the ones above, tracked so that the committer can drop them.
+    if (result.rewrittenDeleteFiles() != null && result.rewrittenDeleteFiles().length > 0) {
+      rewrittenDeleteManifest =
+          writeDeleteFiles(
+              outputFileSupplier.get(),
+              spec,
+              Lists.newArrayList(result.rewrittenDeleteFiles()),
+              formatVersion);
+    }
+
+    return new DeltaManifests(
+        dataManifest, deleteManifest, rewrittenDeleteManifest, result.referencedDataFiles());
+  }
+
+  private static ManifestFile writeDeleteFiles(
+      OutputFile outputFile, PartitionSpec spec, List<DeleteFile> deleteFiles, int formatVersion)
+      throws IOException {
+    ManifestWriter<DeleteFile> writer =
+        ManifestFiles.writeDeleteManifest(formatVersion, spec, outputFile, DUMMY_SNAPSHOT_ID);
+    try (ManifestWriter<DeleteFile> closeableWriter = writer) {
+      for (DeleteFile deleteFile : deleteFiles) {
+        closeableWriter.add(deleteFile);
+      }
+    }
+
+    return writer.toManifestFile();
   }
 
   public static WriteResult readCompletedFiles(
@@ -149,6 +169,14 @@ public class FlinkManifestUtil {
       try (CloseableIterable<DeleteFile> deleteFiles =
           ManifestFiles.readDeleteManifest(deltaManifests.deleteManifest(), io, specsById)) {
         builder.addDeleteFiles(deleteFiles);
+      }
+    }
+
+    if (deltaManifests.rewrittenDeleteManifest() != null) {
+      try (CloseableIterable<DeleteFile> rewritten =
+          ManifestFiles.readDeleteManifest(
+              deltaManifests.rewrittenDeleteManifest(), io, specsById)) {
+        builder.addRewrittenDeleteFiles(rewritten);
       }
     }
 

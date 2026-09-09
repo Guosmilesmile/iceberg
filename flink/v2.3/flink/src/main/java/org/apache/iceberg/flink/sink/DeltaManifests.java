@@ -31,6 +31,7 @@ public class DeltaManifests {
 
   private final ManifestFile dataManifest;
   private final ManifestFile deleteManifest;
+  private final ManifestFile rewrittenDeleteManifest;
   private final CharSequence[] referencedDataFiles;
 
   DeltaManifests(ManifestFile dataManifest, ManifestFile deleteManifest) {
@@ -39,10 +40,19 @@ public class DeltaManifests {
 
   DeltaManifests(
       ManifestFile dataManifest, ManifestFile deleteManifest, CharSequence[] referencedDataFiles) {
+    this(dataManifest, deleteManifest, null, referencedDataFiles);
+  }
+
+  DeltaManifests(
+      ManifestFile dataManifest,
+      ManifestFile deleteManifest,
+      ManifestFile rewrittenDeleteManifest,
+      CharSequence[] referencedDataFiles) {
     Preconditions.checkNotNull(referencedDataFiles, "Referenced data files shouldn't be null.");
 
     this.dataManifest = dataManifest;
     this.deleteManifest = deleteManifest;
+    this.rewrittenDeleteManifest = rewrittenDeleteManifest;
     this.referencedDataFiles = referencedDataFiles;
   }
 
@@ -54,18 +64,27 @@ public class DeltaManifests {
     return deleteManifest;
   }
 
+  /** Delete files superseded by the ones in {@link #deleteManifest()}, to drop on commit. */
+  ManifestFile rewrittenDeleteManifest() {
+    return rewrittenDeleteManifest;
+  }
+
   CharSequence[] referencedDataFiles() {
     return referencedDataFiles;
   }
 
   public List<ManifestFile> manifests() {
-    List<ManifestFile> manifests = Lists.newArrayListWithCapacity(2);
+    List<ManifestFile> manifests = Lists.newArrayListWithCapacity(3);
     if (dataManifest != null) {
       manifests.add(dataManifest);
     }
 
     if (deleteManifest != null) {
       manifests.add(deleteManifest);
+    }
+
+    if (rewrittenDeleteManifest != null) {
+      manifests.add(rewrittenDeleteManifest);
     }
 
     return manifests;
