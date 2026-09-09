@@ -79,15 +79,32 @@ abstract class BaseDeltaTaskWriter extends BaseTaskWriter<RowData> {
 
   @Override
   public void write(RowData row) throws IOException {
-    RowDataDeltaWriter writer = route(row);
+    applyChange(row, upsert, keyProjection, route(row));
+  }
 
+  /** Receives what a changelog row asks for, see {@link #applyChange}. */
+  interface RowChanges {
+    void insert(RowData row) throws IOException;
+
+    void delete(RowData row) throws IOException;
+
+    void deleteKey(RowData key) throws IOException;
+  }
+
+  /**
+   * Translates a changelog row into the inserts and deletes it stands for. In upsert mode every
+   * insert deletes the previous row of its key first, and deletes are by key only.
+   */
+  static void applyChange(
+      RowData row, boolean upsert, RowDataProjection keyProjection, RowChanges changes)
+      throws IOException {
     switch (row.getRowKind()) {
       case INSERT:
       case UPDATE_AFTER:
         if (upsert) {
-          writer.deleteKey(keyProjection.wrap(row));
+          changes.deleteKey(keyProjection.wrap(row));
         }
-        writer.write(row);
+        changes.insert(row);
         break;
 
       case UPDATE_BEFORE:
@@ -95,13 +112,13 @@ abstract class BaseDeltaTaskWriter extends BaseTaskWriter<RowData> {
           break; // UPDATE_BEFORE is not necessary for UPSERT, we do nothing to prevent delete one
           // row twice
         }
-        writer.delete(row);
+        changes.delete(row);
         break;
       case DELETE:
         if (upsert) {
-          writer.deleteKey(keyProjection.wrap(row));
+          changes.deleteKey(keyProjection.wrap(row));
         } else {
-          writer.delete(row);
+          changes.delete(row);
         }
         break;
 
@@ -110,9 +127,14 @@ abstract class BaseDeltaTaskWriter extends BaseTaskWriter<RowData> {
     }
   }
 
-  protected class RowDataDeltaWriter extends BaseEqualityDeltaWriter {
+  protected class RowDataDeltaWriter extends BaseEqualityDeltaWriter implements RowChanges {
     RowDataDeltaWriter(PartitionKey partition, PartitioningDVWriter<RowData> dvFileWriter) {
       super(partition, schema, deleteSchema, DeleteGranularity.FILE, dvFileWriter);
+    }
+
+    @Override
+    public void insert(RowData row) throws IOException {
+      write(row);
     }
 
     @Override

@@ -24,20 +24,26 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.apache.flink.api.connector.sink2.Committer;
 import org.apache.flink.core.io.SimpleVersionedSerialization;
 import org.apache.iceberg.AppendFiles;
+import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.ManifestFile;
 import org.apache.iceberg.ReplacePartitions;
 import org.apache.iceberg.RowDelta;
 import org.apache.iceberg.SnapshotUpdate;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.flink.TableLoader;
+import org.apache.iceberg.io.OutputFileFactory;
 import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.PropertyUtil;
@@ -69,6 +75,12 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
   @VisibleForTesting
   static final String MAX_CONTINUOUS_EMPTY_COMMITS = "flink.max-continuous-empty-commits";
 
+  /**
+   * How often the deletion vectors of one checkpoint are merged again after a concurrent commit
+   * made the previous attempt invalid, before the job is failed.
+   */
+  private static final int MAX_DV_ONLY_COMMIT_ATTEMPTS = 10;
+
   private final String branch;
   private final Map<String, String> snapshotProperties;
   private final boolean replacePartitions;
@@ -79,6 +91,8 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
   private ExecutorService workerPool;
   private int continuousEmptyCheckpoints = 0;
   private final boolean tableMaintenanceEnabled;
+  private final boolean dvOnlyMode;
+  private DvOnlyDeletionVectorMerger deletionVectorMerger;
   private final int subtaskId;
 
   IcebergCommitter(
@@ -91,12 +105,39 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
       IcebergFilesCommitterMetrics committerMetrics,
       boolean tableMaintenanceEnabled,
       int subtaskId) {
+    this(
+        tableLoader,
+        branch,
+        snapshotProperties,
+        replacePartitions,
+        workerPoolSize,
+        sinkId,
+        committerMetrics,
+        tableMaintenanceEnabled,
+        false,
+        ImmutableSet.of(),
+        subtaskId);
+  }
+
+  IcebergCommitter(
+      TableLoader tableLoader,
+      String branch,
+      Map<String, String> snapshotProperties,
+      boolean replacePartitions,
+      int workerPoolSize,
+      String sinkId,
+      IcebergFilesCommitterMetrics committerMetrics,
+      boolean tableMaintenanceEnabled,
+      boolean dvOnlyMode,
+      Set<Integer> equalityFieldIds,
+      int subtaskId) {
     this.branch = branch;
     this.snapshotProperties = snapshotProperties;
     this.replacePartitions = replacePartitions;
     this.committerMetrics = committerMetrics;
     this.tableLoader = tableLoader;
     this.tableMaintenanceEnabled = tableMaintenanceEnabled;
+    this.dvOnlyMode = dvOnlyMode;
     this.subtaskId = subtaskId;
 
     // IcebergSink#addPreCommitTopology routes all committables to subtask 0 via a .global()
@@ -114,6 +155,16 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
       this.workerPool =
           ThreadPools.newFixedThreadPool(
               "iceberg-committer-pool-" + table.name() + "-" + sinkId, workerPoolSize);
+      if (dvOnlyMode) {
+        this.deletionVectorMerger =
+            new DvOnlyDeletionVectorMerger(
+                table,
+                branch,
+                equalityFieldIds,
+                OutputFileFactory.builderFor(table, subtaskId, 0L)
+                    .format(FileFormat.PUFFIN)
+                    .build());
+      }
     }
 
     this.continuousEmptyCheckpoints = 0;
@@ -172,6 +223,7 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
     long checkpointId = commitRequestMap.lastKey();
     List<ManifestFile> manifests = Lists.newArrayList();
     NavigableMap<Long, WriteResult> pendingResults = Maps.newTreeMap();
+    Map<Long, Long> baselineSnapshotIds = Maps.newHashMap();
     for (Map.Entry<Long, CommitRequest<IcebergCommittable>> e : commitRequestMap.entrySet()) {
       if (Arrays.equals(EMPTY_MANIFEST_DATA, e.getValue().getCommittable().manifest())) {
         pendingResults.put(e.getKey(), EMPTY_WRITE_RESULT);
@@ -182,12 +234,13 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
         pendingResults.put(
             e.getKey(),
             FlinkManifestUtil.readCompletedFiles(deltaManifests, table.io(), table.specs()));
+        baselineSnapshotIds.put(e.getKey(), deltaManifests.baselineSnapshotId());
         manifests.addAll(deltaManifests.manifests());
       }
     }
 
     CommitSummary summary = new CommitSummary(pendingResults);
-    commitPendingResult(pendingResults, summary, newFlinkJobId, operatorId);
+    commitPendingResult(pendingResults, baselineSnapshotIds, summary, newFlinkJobId, operatorId);
     if (committerMetrics != null) {
       committerMetrics.updateCommitSummary(summary);
     }
@@ -208,6 +261,7 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
 
   private void commitPendingResult(
       NavigableMap<Long, WriteResult> pendingResults,
+      Map<Long, Long> baselineSnapshotIds,
       CommitSummary summary,
       String newFlinkJobId,
       String operatorId) {
@@ -217,7 +271,7 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
       if (replacePartitions) {
         replacePartitions(pendingResults, summary, newFlinkJobId, operatorId);
       } else {
-        commitDeltaTxn(pendingResults, summary, newFlinkJobId, operatorId);
+        commitDeltaTxn(pendingResults, baselineSnapshotIds, summary, newFlinkJobId, operatorId);
       }
       continuousEmptyCheckpoints = 0;
     } else {
@@ -249,6 +303,7 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
 
   private void commitDeltaTxn(
       NavigableMap<Long, WriteResult> pendingResults,
+      Map<Long, Long> baselineSnapshotIds,
       CommitSummary summary,
       String newFlinkJobId,
       String operatorId) {
@@ -274,6 +329,16 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
         // to data files from txn1. Committing the merged one will lead to the incorrect delete
         // semantic.
         WriteResult result = e.getValue();
+        if (dvOnlyMode) {
+          commitDvOnlyDelta(
+              result,
+              baselineSnapshotIds.get(e.getKey()),
+              summary,
+              newFlinkJobId,
+              operatorId,
+              e.getKey());
+          continue;
+        }
 
         // Row delta validations are not needed for streaming changes that write equality deletes.
         // Equality deletes are applied to data in all previous sequence numbers, so retries may
@@ -292,6 +357,126 @@ class IcebergCommitter implements Committer<IcebergCommittable> {
         commitOperation(rowDelta, description, newFlinkJobId, operatorId, e.getKey());
       }
     }
+  }
+
+  /**
+   * Commits one checkpoint of the DV-only write path.
+   *
+   * <p>Its deletion vectors were merged with the vectors the table held when the checkpoint barrier
+   * arrived, and resolve deletes against the primary key index as of the baseline snapshot. They
+   * are committed as they are unless something committed since the baseline invalidates them: a
+   * data file they reference was removed, a vector was added to one of those files, or a vector
+   * they replace was removed. The commit validates exactly that.
+   *
+   * <p>Such a conflict is not an error of the checkpoint, and failing the job would only replay the
+   * same commit, so the vectors are merged again against the current table and the commit is
+   * retried with that.
+   *
+   * <p>When the baseline is no longer an ancestor of the branch, typically because it expired while
+   * the job was down, what was committed since cannot be validated. The vectors are merged against
+   * the current snapshot instead, provided every data file they reference is still part of it.
+   */
+  private void commitDvOnlyDelta(
+      WriteResult result,
+      Long baselineSnapshotId,
+      CommitSummary summary,
+      String newFlinkJobId,
+      String operatorId,
+      long checkpointId) {
+    table.refresh();
+    boolean asWritten = deletionVectorMerger.isTraceable(baselineSnapshotId);
+    Long mergeBaseline =
+        asWritten
+            ? baselineSnapshotId
+            : deletionVectorMerger.replaceBaseline(result, baselineSnapshotId);
+
+    int merges = 0;
+    while (true) {
+      Iterable<DeleteFile> deletionVectors = Arrays.asList(result.deleteFiles());
+      Iterable<DeleteFile> replacedDeletionVectors = Arrays.asList(result.rewrittenDeleteFiles());
+      Iterable<? extends CharSequence> referencedDataFiles =
+          Arrays.asList(result.referencedDataFiles());
+      Long fromSnapshotId = baselineSnapshotId;
+      DvOnlyDeletionVectorMerger.Merged merged = null;
+      if (!asWritten) {
+        table.refresh();
+        merged = deletionVectorMerger.merge(result, mergeBaseline);
+        merges++;
+        deletionVectors = merged.deletionVectors();
+        replacedDeletionVectors = merged.replacedDeletionVectors();
+        referencedDataFiles = merged.referencedDataFiles();
+        fromSnapshotId = merged.head() != null ? merged.head().snapshotId() : null;
+      }
+
+      try {
+        commitDvOnlyAttempt(
+            result,
+            deletionVectors,
+            replacedDeletionVectors,
+            referencedDataFiles,
+            fromSnapshotId,
+            summary,
+            newFlinkJobId,
+            operatorId,
+            checkpointId);
+      } catch (ValidationException e) {
+        if (merged != null) {
+          DvOnlyDeletionVectorMerger.deleteQuietly(table.io(), merged.deletionVectors());
+        }
+
+        if (merges >= MAX_DV_ONLY_COMMIT_ATTEMPTS) {
+          throw e;
+        }
+
+        LOG.warn(
+            "A concurrent commit to table {} branch {} conflicts with the deletion vectors of "
+                + "checkpoint {}, merging them again ({} of {} merges done)",
+            table.name(),
+            branch,
+            checkpointId,
+            merges,
+            MAX_DV_ONLY_COMMIT_ATTEMPTS,
+            e);
+        asWritten = false;
+        continue;
+      }
+
+      if (merged != null) {
+        // Superseded by the merged vectors, which are the ones that got committed.
+        DvOnlyDeletionVectorMerger.deleteQuietly(table.io(), Arrays.asList(result.deleteFiles()));
+      }
+
+      return;
+    }
+  }
+
+  /**
+   * Commits the data files of a checkpoint with the given deletion vectors, failing with a {@link
+   * ValidationException} when anything committed after {@code fromSnapshotId} conflicts with them.
+   */
+  private void commitDvOnlyAttempt(
+      WriteResult result,
+      Iterable<DeleteFile> deletionVectors,
+      Iterable<DeleteFile> replacedDeletionVectors,
+      Iterable<? extends CharSequence> referencedDataFiles,
+      Long fromSnapshotId,
+      CommitSummary summary,
+      String newFlinkJobId,
+      String operatorId,
+      long checkpointId) {
+    RowDelta rowDelta = table.newRowDelta().scanManifestsWith(workerPool);
+    Arrays.stream(result.dataFiles()).forEach(rowDelta::addRows);
+    deletionVectors.forEach(rowDelta::addDeletes);
+    replacedDeletionVectors.forEach(rowDelta::removeDeletes);
+    if (fromSnapshotId != null) {
+      rowDelta.validateFromSnapshot(fromSnapshotId);
+    }
+
+    rowDelta.validateDataFilesExist(referencedDataFiles).validateDeletedFiles();
+
+    String description = "rowDelta";
+    logCommitSummary(summary, description);
+    commitOperation(rowDelta, description, newFlinkJobId, operatorId, checkpointId);
   }
 
   private void commitOperation(

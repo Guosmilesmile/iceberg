@@ -16,37 +16,28 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.iceberg.flink.maintenance.operator;
+package org.apache.iceberg.flink.sink;
 
 import java.io.Serializable;
-import java.util.Arrays;
 import org.apache.flink.annotation.Internal;
+import org.apache.iceberg.flink.maintenance.operator.DVPosition;
+import org.apache.iceberg.flink.maintenance.operator.SerializedEqualityValues;
 
 /**
- * Serialized primary key used as a Flink keyed state key. Wraps the raw bytes with content-based
- * {@code equals}/{@code hashCode} so that Flink's keyBy partitions by key value, not by reference.
+ * The location of a live row, keyed by its equality field values. Emitted by the writer for rows it
+ * wrote and by the bootstrap reader for rows already in the table, and consumed by the operator
+ * that resolves equality deletes to deletion vectors.
  *
- * <p>Using the full serialized key (instead of a hash) eliminates hash collisions: two distinct
- * primary keys always map to separate Flink state entries.
+ * @param key serialized equality field values of the row
+ * @param position file, offset, spec and partition of the row
  */
 @Internal
-public record SerializedEqualityValues(byte[] data) implements Serializable {
+public record PkIndexEntry(SerializedEqualityValues key, DVPosition position)
+    implements Serializable {
 
-  @Override
-  public boolean equals(Object o) {
-    if (this == o) {
-      return true;
-    }
-
-    if (!(o instanceof SerializedEqualityValues other)) {
-      return false;
-    }
-
-    return Arrays.equals(data, other.data);
-  }
-
-  @Override
-  public int hashCode() {
-    return Arrays.hashCode(data);
-  }
+  /**
+   * Data sequence number used for rows whose data file is not committed yet. Resolution in the
+   * DV-only write path is ordered by checkpoint rather than by sequence number.
+   */
+  public static final long UNKNOWN_SEQUENCE = -1L;
 }

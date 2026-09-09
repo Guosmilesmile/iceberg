@@ -257,6 +257,30 @@ public class FlinkWriteConf {
   }
 
   /**
+   * Returns whether the sink resolves equality deletes to deletion vectors before committing, so
+   * that no equality delete is written to the table.
+   */
+  @Experimental
+  public boolean dvOnlyMode() {
+    return confParser
+        .booleanConf()
+        .option(FlinkWriteOptions.DV_ONLY_ENABLE.key())
+        .flinkConfig(FlinkWriteOptions.DV_ONLY_ENABLE)
+        .defaultValue(FlinkWriteOptions.DV_ONLY_ENABLE.defaultValue())
+        .parse();
+  }
+
+  /** Returns the resolve parallelism, or null to fall back to the write parallelism. */
+  @Experimental
+  public Integer dvOnlyResolveParallelism() {
+    return confParser
+        .intConf()
+        .option(FlinkWriteOptions.DV_ONLY_RESOLVE_PARALLELISM.key())
+        .flinkConfig(FlinkWriteOptions.DV_ONLY_RESOLVE_PARALLELISM)
+        .parseOptional();
+  }
+
+  /**
    * NOTE: This may be removed or changed in a future release. This value specifies the interval for
    * refreshing the table instances in sink writer subtasks. If not specified then the default
    * behavior is to not refresh the table.

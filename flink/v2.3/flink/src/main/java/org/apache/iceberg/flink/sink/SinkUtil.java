@@ -84,26 +84,52 @@ public class SinkUtil {
 
   static long getMaxCommittedCheckpointId(
       Table table, String flinkJobId, String operatorId, String branch) {
-    Snapshot snapshot = table.snapshot(branch);
-    long lastCommittedCheckpointId = INITIAL_CHECKPOINT_ID;
+    return maxCommittedCheckpointId(table, table.snapshot(branch), flinkJobId, operatorId);
+  }
 
+  /**
+   * Returns the last checkpoint committed by the given job in the history of {@code head}, or -1
+   * when there is none.
+   *
+   * @param operatorId the committing operator, or null to accept any operator of the job
+   */
+  static long maxCommittedCheckpointId(
+      Table table, Snapshot head, String flinkJobId, @Nullable String operatorId) {
+    Snapshot snapshot = head;
     while (snapshot != null) {
-      Map<String, String> summary = snapshot.summary();
-      String snapshotFlinkJobId = summary.get(FLINK_JOB_ID);
-      String snapshotOperatorId = summary.get(OPERATOR_ID);
-      if (flinkJobId.equals(snapshotFlinkJobId)
-          && (snapshotOperatorId == null || snapshotOperatorId.equals(operatorId))) {
-        String value = summary.get(MAX_COMMITTED_CHECKPOINT_ID);
-        if (value != null) {
-          lastCommittedCheckpointId = Long.parseLong(value);
-          break;
-        }
+      Long checkpointId = committedCheckpointId(snapshot, flinkJobId, operatorId);
+      if (checkpointId != null) {
+        return checkpointId;
       }
+
       Long parentSnapshotId = snapshot.parentId();
       snapshot = parentSnapshotId != null ? table.snapshot(parentSnapshotId) : null;
     }
 
-    return lastCommittedCheckpointId;
+    return INITIAL_CHECKPOINT_ID;
+  }
+
+  /**
+   * Returns the last checkpoint a snapshot committed, or null when the given job did not commit it.
+   *
+   * @param operatorId the committing operator, or null to accept any operator of the job
+   */
+  static Long committedCheckpointId(
+      Snapshot snapshot, String flinkJobId, @Nullable String operatorId) {
+    Map<String, String> summary = snapshot.summary();
+    if (!flinkJobId.equals(summary.get(FLINK_JOB_ID))) {
+      return null;
+    }
+
+    String snapshotOperatorId = summary.get(OPERATOR_ID);
+    if (operatorId != null
+        && snapshotOperatorId != null
+        && !snapshotOperatorId.equals(operatorId)) {
+      return null;
+    }
+
+    String value = summary.get(MAX_COMMITTED_CHECKPOINT_ID);
+    return value != null ? Long.parseLong(value) : null;
   }
 
   /**
