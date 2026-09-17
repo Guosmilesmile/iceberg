@@ -335,34 +335,15 @@ public class IcebergSink
     DataStream<CommittableMessage<SinkWriteResult>> aggregatorInput =
         dvOnlyMode ? resolveEqualityDeletes(writeResults, suffix) : writeResults;
 
-    // global forces all output records send to subtask 0 of the downstream committer operator.
-    // This is to ensure commit only happen in one committer subtask.
-    // Once upstream Flink provides the capability of setting committer operator
-    // parallelism to 1, this can be removed.
     return aggregatorInput
         .global()
         .transform(preCommitAggregatorUid, typeInformation, new IcebergWriteAggregator(tableLoader))
         .uid(preCommitAggregatorUid)
         .setParallelism(1)
         .setMaxParallelism(1)
-        // global forces all output records send to subtask 0 of the downstream committer operator.
-        // This is to ensure commit only happen in one committer subtask.
-        // Once upstream Flink provides the capability of setting committer operator
-        // parallelism to 1, this can be removed.
         .global();
   }
 
-  /**
-   * Replaces the unresolved deletes carried by {@code writeResults} with the deletion vectors they
-   * resolve to, so that the aggregator only ever sees data files and deletion vectors.
-   *
-   * <p>The committable stream is first exploded into per-row records. Those are keyed by equality
-   * values to resolve each delete into the position of the row it removes, then keyed by data file
-   * path so that a data file gets a single deletion vector. The files ride along untouched.
-   *
-   * <p>Committable summaries are dropped because {@link IcebergWriteAggregator} ignores incoming
-   * summaries and emits one of its own, which leaves the pre-commit topology free to repartition.
-   */
   private DataStream<CommittableMessage<SinkWriteResult>> resolveEqualityDeletes(
       DataStream<CommittableMessage<SinkWriteResult>> writeResults, String suffix) {
     String explodeUid = String.format("Sink pre-commit explode: %s", suffix);
