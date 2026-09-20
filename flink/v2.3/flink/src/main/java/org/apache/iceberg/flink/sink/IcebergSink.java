@@ -90,6 +90,7 @@ import org.apache.iceberg.flink.maintenance.api.RewriteDataFilesConfig;
 import org.apache.iceberg.flink.maintenance.api.TableMaintenance;
 import org.apache.iceberg.flink.maintenance.operator.DVPosition;
 import org.apache.iceberg.flink.maintenance.operator.LockFactoryBuilder;
+import org.apache.iceberg.flink.maintenance.operator.StructLikeSerializer;
 import org.apache.iceberg.flink.maintenance.operator.TableChange;
 import org.apache.iceberg.flink.sink.shuffle.DataStatisticsOperatorFactory;
 import org.apache.iceberg.flink.sink.shuffle.RangePartitioner;
@@ -350,12 +351,18 @@ public class IcebergSink
     String resolveUid = String.format("Sink pre-commit resolve: %s", suffix);
     String dvWriterUid = String.format("Sink pre-commit dv writer: %s", suffix);
 
+    // The index restored on startup is only usable while the equality fields keep the same ids and
+    // types, which is what the key fingerprint captures.
+    String keyFingerprint =
+        StructLikeSerializer.keyFingerprint(
+            TypeUtil.select(table.schema(), equalityFieldIds).asStruct());
+
     SingleOutputStreamOperator<DvOnlyRecord> exploded =
         writeResults
             .transform(
                 explodeUid,
                 TypeInformation.of(DvOnlyRecord.class),
-                new DvOnlyExplodeOperator(tableLoader, branch, equalityFieldIds))
+                new DvOnlyExplodeOperator(tableLoader, branch, equalityFieldIds, keyFingerprint))
             .uid(explodeUid)
             .setParallelism(writeResults.getParallelism());
 

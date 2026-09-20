@@ -73,6 +73,20 @@ public class StructLikeSerializer {
     return new SerializedEqualityValues(baos.toByteArray());
   }
 
+  /**
+   * Stable description of the key structure this serializer encodes: the equality field ids in
+   * order, each with its type. Keys serialized under different fingerprints cannot be matched
+   * against each other, so state holding serialized keys has to be rebuilt when this changes.
+   */
+  public static String keyFingerprint(Types.StructType keyType) {
+    StringBuilder fingerprint = new StringBuilder();
+    for (Types.NestedField field : keyType.fields()) {
+      fingerprint.append(field.fieldId()).append(':').append(field.type()).append(';');
+    }
+
+    return fingerprint.toString();
+  }
+
   public byte[] encodePartition(StructLike partition, Types.StructType partitionType) {
     List<Types.NestedField> fields = partitionType.fields();
     if (fields.isEmpty()) {

@@ -35,6 +35,7 @@ import org.apache.flink.util.OutputTag;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.flink.TableLoader;
 import org.apache.iceberg.flink.maintenance.operator.SerializedEqualityValues;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,17 +53,24 @@ class DvOnlyExplodeOperator extends AbstractStreamOperator<DvOnlyRecord>
   private static final ListStateDescriptor<Boolean> SEEDED_DESCRIPTOR =
       new ListStateDescriptor<>("dvOnlyIndexSeeded", Types.BOOLEAN);
 
+  private static final ListStateDescriptor<String> KEY_FINGERPRINT_DESCRIPTOR =
+      new ListStateDescriptor<>("dvOnlyIndexKeyFingerprint", Types.STRING);
+
   private final TableLoader tableLoader;
   private final String branch;
   private final Set<Integer> equalityFieldIds;
+  private final String keyFingerprint;
 
   private transient ListState<Boolean> seededState;
+  private transient ListState<String> fingerprintState;
   private transient boolean seeded;
 
-  DvOnlyExplodeOperator(TableLoader tableLoader, String branch, Set<Integer> equalityFieldIds) {
+  DvOnlyExplodeOperator(
+      TableLoader tableLoader, String branch, Set<Integer> equalityFieldIds, String keyFingerprint) {
     this.tableLoader = tableLoader;
     this.branch = branch;
     this.equalityFieldIds = ImmutableSet.copyOf(equalityFieldIds);
+    this.keyFingerprint = keyFingerprint;
   }
 
   @Override
@@ -72,6 +80,25 @@ class DvOnlyExplodeOperator extends AbstractStreamOperator<DvOnlyRecord>
     for (Boolean value : seededState.get()) {
       seeded = seeded || value;
     }
+
+    fingerprintState = context.getOperatorStateStore().getListState(KEY_FINGERPRINT_DESCRIPTOR);
+    String restoredFingerprint = null;
+    for (String value : fingerprintState.get()) {
+      restoredFingerprint = value;
+    }
+
+    if (restoredFingerprint != null) {
+      // The index is keyed by serialized equality values, so an index built from other equality
+      // fields than the ones currently configured can no longer match them.
+      Preconditions.checkState(
+          restoredFingerprint.equals(keyFingerprint),
+          "The primary key index was built from equality fields [%s], but the sink is configured "
+              + "with [%s]. Clear the job state and restart to rebuild the index.",
+          restoredFingerprint,
+          keyFingerprint);
+    } else if (seeded) {
+      LOG.warn("Restored a primary key index without a key fingerprint, skipping the check");
+    }
   }
 
   @Override
@@ -79,6 +106,8 @@ class DvOnlyExplodeOperator extends AbstractStreamOperator<DvOnlyRecord>
     super.snapshotState(context);
     seededState.clear();
     seededState.add(seeded);
+    fingerprintState.clear();
+    fingerprintState.add(keyFingerprint);
   }
 
   @Override
