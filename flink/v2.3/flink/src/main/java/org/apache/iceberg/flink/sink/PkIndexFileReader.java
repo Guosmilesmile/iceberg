@@ -25,13 +25,12 @@ import java.util.Set;
 import java.util.function.Consumer;
 import org.apache.flink.annotation.Internal;
 import org.apache.iceberg.Accessor;
-import org.apache.iceberg.ContentFile;
+import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileContent;
-import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.MetadataColumns;
+import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
-import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.BaseDeleteLoader;
@@ -51,100 +50,49 @@ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.ContentFileUtil;
-import org.apache.iceberg.util.ThreadPools;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
- * Reads the rows already committed to a branch and reports where each of them lives, which is how
- * the primary key index learns about data written before the job started.
+ * Reports where the live rows of a committed data file are, which is how the primary key index
+ * learns about data it did not write itself.
  *
- * <p>Files are split across the parallel instances by a stable hash of their location, so each file
- * is read exactly once no matter how many instances take part. Rows already covered by a deletion
- * vector are skipped, since they are not live.
+ * <p>Only the equality fields and the row position are read, and rows already covered by a deletion
+ * vector are skipped since they are not live.
  */
 @Internal
-class PkIndexBootstrap {
-
-  private static final Logger LOG = LoggerFactory.getLogger(PkIndexBootstrap.class);
+class PkIndexFileReader {
 
   private final Table table;
-  private final String branch;
-  private final Set<Integer> equalityFieldIds;
   private final Schema keySchema;
   private final Schema readSchema;
   private final StructLikeSerializer serializer = new StructLikeSerializer();
   private final DeleteLoader deleteLoader;
 
-  PkIndexBootstrap(Table table, String branch, Set<Integer> equalityFieldIds) {
+  PkIndexFileReader(Table table, Set<Integer> equalityFieldIds) {
     Preconditions.checkArgument(
         equalityFieldIds != null && !equalityFieldIds.isEmpty(),
         "Equality field ids must not be empty");
     this.table = table;
-    this.branch = branch;
-    this.equalityFieldIds = ImmutableSet.copyOf(equalityFieldIds);
-    this.keySchema = TypeUtil.select(table.schema(), this.equalityFieldIds);
+    Set<Integer> fieldIds = ImmutableSet.copyOf(equalityFieldIds);
+    this.keySchema = TypeUtil.select(table.schema(), fieldIds);
     Preconditions.checkArgument(
-        TypeUtil.getProjectedIds(keySchema).containsAll(this.equalityFieldIds),
+        TypeUtil.getProjectedIds(keySchema).containsAll(fieldIds),
         "Equality field ids %s are not present in table schema",
-        this.equalityFieldIds);
+        fieldIds);
     this.readSchema = withRowPosition(keySchema);
     this.deleteLoader = new BaseDeleteLoader(file -> table.io().newInputFile(file));
   }
 
   /**
-   * Reports every live row of the files assigned to {@code subtaskIndex}.
+   * Reports every live row of one data file.
    *
-   * @param subtaskIndex index of the calling instance
-   * @param parallelism number of instances sharing the work
+   * @param task the data file and the delete files that apply to it
    * @param out receives one entry per live row
+   * @return the number of rows reported
    */
-  void read(int subtaskIndex, int parallelism, Consumer<PkIndexEntry> out) {
-    Snapshot snapshot = table.snapshot(branch);
-    if (snapshot == null) {
-      LOG.info("Branch '{}' of table {} is empty, nothing to bootstrap", branch, table.name());
-      return;
-    }
-
-    long files = 0;
-    long rows = 0;
-    try (CloseableIterable<FileScanTask> tasks =
-        table
-            .newScan()
-            .useSnapshot(snapshot.snapshotId())
-            .planWith(ThreadPools.getWorkerPool())
-            .planFiles()) {
-      for (FileScanTask task : tasks) {
-        if (!ownedBy(task, subtaskIndex, parallelism)) {
-          continue;
-        }
-
-        files++;
-        rows += read(task, out);
-      }
-    } catch (IOException e) {
-      throw new UncheckedIOException(
-          "Failed to plan files for the primary key index of table " + table.name(), e);
-    }
-
-    LOG.info(
-        "Bootstrapped {} live row(s) from {} data file(s) of branch '{}' on subtask {}/{}",
-        rows,
-        files,
-        branch,
-        subtaskIndex,
-        parallelism);
-  }
-
-  /** Spreads the files over the parallel instances so that each file is read exactly once. */
-  private static boolean ownedBy(FileScanTask task, int subtaskIndex, int parallelism) {
-    return Math.floorMod(task.file().location().hashCode(), parallelism) == subtaskIndex;
-  }
-
-  private long read(FileScanTask task, Consumer<PkIndexEntry> out) throws IOException {
-    ContentFile<?> file = task.file();
-    PositionDeleteIndex deleted = deletedPositions(task);
-    Types.StructType partitionType = task.spec().partitionType();
+  long read(PkIndexReadTask task, Consumer<PkIndexEntry> out) {
+    DataFile file = task.file();
+    PositionDeleteIndex deleted = deletedPositions(file, task.deletes());
+    Types.StructType partitionType = spec(file.specId()).partitionType();
     byte[] partition = serializer.encodePartition(file.partition(), partitionType);
 
     InputFile input = table.io().newInputFile(file.location());
@@ -173,15 +121,18 @@ class PkIndexBootstrap {
                     PkIndexEntry.UNKNOWN_SEQUENCE)));
         rows++;
       }
+    } catch (IOException e) {
+      throw new UncheckedIOException(
+          "Failed to read data file for the primary key index: " + file.location(), e);
     }
 
     return rows;
   }
 
   /** Positions of the file that a deletion vector already removed, or null when there is none. */
-  private PositionDeleteIndex deletedPositions(FileScanTask task) {
+  private PositionDeleteIndex deletedPositions(DataFile file, DeleteFile[] deletes) {
     List<DeleteFile> deletionVectors = Lists.newArrayList();
-    for (DeleteFile deleteFile : task.deletes()) {
+    for (DeleteFile deleteFile : deletes) {
       if (ContentFileUtil.isDV(deleteFile)) {
         deletionVectors.add(deleteFile);
       } else {
@@ -193,7 +144,7 @@ class PkIndexBootstrap {
                 "Cannot build the primary key index of table %s: data file %s has a %s delete file "
                     + "(%s) attached, but only deletion vectors are supported.",
                 table.name(),
-                task.file().location(),
+                file.location(),
                 deleteFile.content() == FileContent.EQUALITY_DELETES ? "equality" : "position",
                 deleteFile.location()));
       }
@@ -203,7 +154,20 @@ class PkIndexBootstrap {
       return null;
     }
 
-    return deleteLoader.loadPositionDeletes(deletionVectors, task.file().location());
+    return deleteLoader.loadPositionDeletes(deletionVectors, file.location());
+  }
+
+  /** Refreshes once for a spec added after the table was loaded, rather than failing on it. */
+  private PartitionSpec spec(int specId) {
+    PartitionSpec spec = table.specs().get(specId);
+    if (spec == null) {
+      table.refresh();
+      spec = table.specs().get(specId);
+    }
+
+    Preconditions.checkState(
+        spec != null, "Cannot find partition spec %s in table %s", specId, table.name());
+    return spec;
   }
 
   private static Schema withRowPosition(Schema schema) {

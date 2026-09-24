@@ -18,13 +18,8 @@
  */
 package org.apache.iceberg.flink.sink;
 
-import java.util.Set;
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.api.common.state.ListState;
-import org.apache.flink.api.common.state.ListStateDescriptor;
-import org.apache.flink.api.common.typeinfo.Types;
-import org.apache.flink.runtime.state.StateInitializationContext;
-import org.apache.flink.runtime.state.StateSnapshotContext;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.streaming.api.connector.sink2.CommittableMessage;
 import org.apache.flink.streaming.api.connector.sink2.CommittableMessageTypeInfo;
 import org.apache.flink.streaming.api.connector.sink2.CommittableWithLineage;
@@ -32,93 +27,34 @@ import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.util.OutputTag;
-import org.apache.iceberg.Table;
-import org.apache.iceberg.flink.TableLoader;
 import org.apache.iceberg.flink.maintenance.operator.SerializedEqualityValues;
-import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
-import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
+/**
+ * Splits a writer committable into the three streams the pre-commit topology handles separately:
+ * the rows that enter the primary key index, the deletes that have to be resolved against it, and
+ * the files that are committed as they are.
+ *
+ * <p>Rows leave on the main output because they are shuffled by data file, deletes on {@link
+ * #DELETES_STREAM} because they are shuffled by equality key, and the files on {@link
+ * #FILES_STREAM} because they need no shuffle at all.
+ *
+ * <p>{@link org.apache.flink.streaming.api.connector.sink2.CommittableSummary} records are dropped:
+ * {@link IcebergWriteAggregator} ignores incoming summaries and emits a single one of its own, so
+ * the pre-commit topology is free to repartition.
+ */
 @Internal
 class DvOnlyExplodeOperator extends AbstractStreamOperator<DvOnlyRecord>
     implements OneInputStreamOperator<CommittableMessage<SinkWriteResult>, DvOnlyRecord> {
 
-  private static final Logger LOG = LoggerFactory.getLogger(DvOnlyExplodeOperator.class);
-
+  // The type must be stated explicitly: an OutputTag cannot capture a parameterized type from an
+  // anonymous subclass, which would leave the side output typed as a raw CommittableMessage and
+  // make it impossible to union with the resolved deletion vectors.
   static final OutputTag<CommittableMessage<SinkWriteResult>> FILES_STREAM =
       new OutputTag<>(
           "dv-only-files", CommittableMessageTypeInfo.of(SinkWriteResultSerializer::new));
 
-  private static final ListStateDescriptor<Boolean> SEEDED_DESCRIPTOR =
-      new ListStateDescriptor<>("dvOnlyIndexSeeded", Types.BOOLEAN);
-
-  private static final ListStateDescriptor<String> KEY_FINGERPRINT_DESCRIPTOR =
-      new ListStateDescriptor<>("dvOnlyIndexKeyFingerprint", Types.STRING);
-
-  private final TableLoader tableLoader;
-  private final String branch;
-  private final Set<Integer> equalityFieldIds;
-  private final String keyFingerprint;
-
-  private transient ListState<Boolean> seededState;
-  private transient ListState<String> fingerprintState;
-  private transient boolean seeded;
-
-  DvOnlyExplodeOperator(
-      TableLoader tableLoader, String branch, Set<Integer> equalityFieldIds, String keyFingerprint) {
-    this.tableLoader = tableLoader;
-    this.branch = branch;
-    this.equalityFieldIds = ImmutableSet.copyOf(equalityFieldIds);
-    this.keyFingerprint = keyFingerprint;
-  }
-
-  @Override
-  public void initializeState(StateInitializationContext context) throws Exception {
-    super.initializeState(context);
-    seededState = context.getOperatorStateStore().getListState(SEEDED_DESCRIPTOR);
-    for (Boolean value : seededState.get()) {
-      seeded = seeded || value;
-    }
-
-    fingerprintState = context.getOperatorStateStore().getListState(KEY_FINGERPRINT_DESCRIPTOR);
-    String restoredFingerprint = null;
-    for (String value : fingerprintState.get()) {
-      restoredFingerprint = value;
-    }
-
-    if (restoredFingerprint != null) {
-      // The index is keyed by serialized equality values, so an index built from other equality
-      // fields than the ones currently configured can no longer match them.
-      Preconditions.checkState(
-          restoredFingerprint.equals(keyFingerprint),
-          "The primary key index was built from equality fields [%s], but the sink is configured "
-              + "with [%s]. Clear the job state and restart to rebuild the index.",
-          restoredFingerprint,
-          keyFingerprint);
-    } else if (seeded) {
-      LOG.warn("Restored a primary key index without a key fingerprint, skipping the check");
-    }
-  }
-
-  @Override
-  public void snapshotState(StateSnapshotContext context) throws Exception {
-    super.snapshotState(context);
-    seededState.clear();
-    seededState.add(seeded);
-    fingerprintState.clear();
-    fingerprintState.add(keyFingerprint);
-  }
-
-  @Override
-  public void prepareSnapshotPreBarrier(long checkpointId) throws Exception {
-    if (!seeded) {
-      seedIndex();
-      seeded = true;
-    }
-
-    super.prepareSnapshotPreBarrier(checkpointId);
-  }
+  static final OutputTag<DvOnlyRecord> DELETES_STREAM =
+      new OutputTag<>("dv-only-deletes", TypeInformation.of(DvOnlyRecord.class));
 
   @Override
   public void processElement(StreamRecord<CommittableMessage<SinkWriteResult>> element) {
@@ -133,41 +69,17 @@ class DvOnlyExplodeOperator extends AbstractStreamOperator<DvOnlyRecord>
     long checkpointId = lineage.getCheckpointId();
 
     for (SerializedEqualityValues key : result.deleteKeys()) {
-      output.collect(new StreamRecord<>(DvOnlyRecord.delete(key, checkpointId)));
+      output.collect(DELETES_STREAM, new StreamRecord<>(DvOnlyRecord.delete(key, checkpointId)));
     }
 
     for (PkIndexEntry entry : result.indexEntries()) {
       output.collect(new StreamRecord<>(DvOnlyRecord.addRow(entry, checkpointId)));
     }
 
-    // Keep the files and drop the payload that the resolve operator consumes.
+    // Keep the files and drop the payload that the index consumes.
     output.collect(
         FILES_STREAM,
         new StreamRecord<>(
             lineage.map(committable -> new SinkWriteResult(committable.writeResult()))));
-  }
-
-  /** Reports the rows the table already holds so that deletes can resolve against them. */
-  private void seedIndex() {
-    int subtaskIndex = getRuntimeContext().getTaskInfo().getIndexOfThisSubtask();
-    int parallelism = getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks();
-    LOG.info("Seeding the primary key index on subtask {}/{}", subtaskIndex, parallelism);
-
-    if (!tableLoader.isOpen()) {
-      tableLoader.open();
-    }
-
-    Table table = tableLoader.loadTable();
-    new PkIndexBootstrap(table, branch, equalityFieldIds)
-        .read(
-            subtaskIndex,
-            parallelism,
-            entry -> output.collect(new StreamRecord<>(DvOnlyRecord.bootstrapRow(entry))));
-  }
-
-  @Override
-  public void close() throws Exception {
-    super.close();
-    tableLoader.close();
   }
 }

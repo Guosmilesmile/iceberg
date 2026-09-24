@@ -51,6 +51,11 @@ import org.slf4j.LoggerFactory;
  * restore replays them from the writer. Memory therefore scales with the number of distinct keys
  * changed per checkpoint, not with the table size. The index itself is keyed state and is backed by
  * the configured state backend.
+ *
+ * <p>An indexed position stops being valid once the data file holding the row leaves the table,
+ * which is what a compaction does. Such positions are removed as they are reported by {@link
+ * DvOnlyFileIndexOperator}, and the rows of the replacement files are reported the same way as the
+ * rows the index started with.
  */
 @Internal
 class DvOnlyResolveOperator extends AbstractStreamOperator<DVPosition>
@@ -80,9 +85,13 @@ class DvOnlyResolveOperator extends AbstractStreamOperator<DVPosition>
     switch (record.type()) {
       case DELETE -> changeFor(record).deleted = true;
       case ADD_ROW -> changeFor(record).added.add(record.position());
-        // Already committed when the job started, so it is part of the index right away and can be
-        // resolved by a delete in the current checkpoint.
+        // Already committed, so it is part of the index right away and can be resolved by a delete
+        // in the current checkpoint.
       case BOOTSTRAP_ROW -> livePositions.add(record.position());
+      case DROP_POSITIONS -> dropPositions(record);
+      default ->
+          throw new IllegalStateException(
+              "Unexpected record in the primary key index: " + record.type());
     }
   }
 
@@ -116,12 +125,15 @@ class DvOnlyResolveOperator extends AbstractStreamOperator<DVPosition>
   private int apply(PendingChange change) throws Exception {
     int resolved = 0;
     if (change.deleted) {
-      for (DVPosition position : livePositions.get()) {
-        output.collect(new StreamRecord<>(position));
-        resolved++;
-      }
+      Iterable<DVPosition> indexed = livePositions.get();
+      if (indexed != null) {
+        for (DVPosition position : indexed) {
+          output.collect(new StreamRecord<>(position));
+          resolved++;
+        }
 
-      livePositions.clear();
+        livePositions.clear();
+      }
     }
 
     for (DVPosition position : change.added) {
@@ -129,6 +141,31 @@ class DvOnlyResolveOperator extends AbstractStreamOperator<DVPosition>
     }
 
     return resolved;
+  }
+
+  /**
+   * Forgets the positions this key holds in a data file that left the table. The rows are either
+   * gone or live on in the file that replaced it, which is indexed on its own.
+   */
+  private void dropPositions(DvOnlyRecord record) throws Exception {
+    Iterable<DVPosition> indexed = livePositions.get();
+    if (indexed == null) {
+      return;
+    }
+
+    List<DVPosition> kept = Lists.newArrayList();
+    boolean dropped = false;
+    for (DVPosition position : indexed) {
+      if (record.filePath().equals(position.dataFilePath())) {
+        dropped = true;
+      } else {
+        kept.add(position);
+      }
+    }
+
+    if (dropped) {
+      livePositions.update(kept);
+    }
   }
 
   private PendingChange changeFor(DvOnlyRecord record) {

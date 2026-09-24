@@ -120,8 +120,7 @@ import org.slf4j.LoggerFactory;
  *   <li>{@link SupportsPreCommitTopology} which we use to place the {@link
  *       org.apache.iceberg.flink.sink.IcebergWriteAggregator} which merges the individual {@link
  *       org.apache.flink.api.connector.sink2.SinkWriter}'s {@link SinkWriteResult}s to a single
- *       {@link
- *       org.apache.iceberg.flink.sink.IcebergCommittable}
+ *       {@link org.apache.iceberg.flink.sink.IcebergCommittable}
  *   <li>{@link org.apache.iceberg.flink.sink.IcebergCommitter} which commits the incoming{@link
  *       org.apache.iceberg.flink.sink.IcebergCommittable}s to the Iceberg table
  *   <li>{@link SupportsPostCommitTopology} we could use for incremental compaction later. This is
@@ -345,9 +344,27 @@ public class IcebergSink
         .global();
   }
 
+  /**
+   * Replaces the unresolved deletes carried by {@code writeResults} with the deletion vectors they
+   * resolve to, so that the aggregator only ever sees data files and deletion vectors.
+   *
+   * <p>The committable stream is exploded into per-row records, which are then keyed by data file
+   * to track what each file holds, keyed by equality values to resolve every delete into the
+   * position of the row it removes, and keyed by data file once more so that a file ends up with a
+   * single deletion vector. The files ride along untouched.
+   *
+   * <p>A second branch of the same stream runs with a parallelism of one and keeps the index in
+   * step with the table, by turning the changes other operations commit into commands the
+   * file-keyed stage applies.
+   *
+   * <p>Committable summaries are dropped because {@link IcebergWriteAggregator} ignores incoming
+   * summaries and emits one of its own, which leaves the pre-commit topology free to repartition.
+   */
   private DataStream<CommittableMessage<SinkWriteResult>> resolveEqualityDeletes(
       DataStream<CommittableMessage<SinkWriteResult>> writeResults, String suffix) {
+    String coordinatorUid = String.format("Sink pre-commit index coordinator: %s", suffix);
     String explodeUid = String.format("Sink pre-commit explode: %s", suffix);
+    String fileIndexUid = String.format("Sink pre-commit file index: %s", suffix);
     String resolveUid = String.format("Sink pre-commit resolve: %s", suffix);
     String dvWriterUid = String.format("Sink pre-commit dv writer: %s", suffix);
 
@@ -360,21 +377,38 @@ public class IcebergSink
     SingleOutputStreamOperator<DvOnlyRecord> exploded =
         writeResults
             .transform(
-                explodeUid,
-                TypeInformation.of(DvOnlyRecord.class),
-                new DvOnlyExplodeOperator(tableLoader, branch, equalityFieldIds, keyFingerprint))
+                explodeUid, TypeInformation.of(DvOnlyRecord.class), new DvOnlyExplodeOperator())
             .uid(explodeUid)
             .setParallelism(writeResults.getParallelism());
 
-    DataStream<CommittableMessage<SinkWriteResult>> files =
-        exploded.getSideOutput(DvOnlyExplodeOperator.FILES_STREAM);
+    SingleOutputStreamOperator<DvOnlyRecord> commands =
+        writeResults
+            .transform(
+                coordinatorUid,
+                TypeInformation.of(DvOnlyRecord.class),
+                new DvOnlyCoordinator(tableLoader, branch, keyFingerprint))
+            .uid(coordinatorUid)
+            .setParallelism(1)
+            .setMaxParallelism(1);
 
     int resolveParallelism =
         Optional.ofNullable(flinkWriteConf.dvOnlyResolveParallelism())
             .orElseGet(writeResults::getParallelism);
 
-    SingleOutputStreamOperator<DVPosition> positions =
+    SingleOutputStreamOperator<DvOnlyRecord> indexedRows =
         exploded
+            .union(commands)
+            .keyBy(DvOnlyRecord::filePath)
+            .transform(
+                fileIndexUid,
+                TypeInformation.of(DvOnlyRecord.class),
+                new DvOnlyFileIndexOperator(tableLoader, equalityFieldIds))
+            .uid(fileIndexUid)
+            .setParallelism(resolveParallelism);
+
+    SingleOutputStreamOperator<DVPosition> positions =
+        indexedRows
+            .union(exploded.getSideOutput(DvOnlyExplodeOperator.DELETES_STREAM))
             .keyBy(DvOnlyRecord::key)
             .transform(
                 resolveUid, TypeInformation.of(DVPosition.class), new DvOnlyResolveOperator())
@@ -391,7 +425,7 @@ public class IcebergSink
             .uid(dvWriterUid)
             .setParallelism(resolveParallelism);
 
-    return files.union(deletionVectors);
+    return exploded.getSideOutput(DvOnlyExplodeOperator.FILES_STREAM).union(deletionVectors);
   }
 
   @Override

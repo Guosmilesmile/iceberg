@@ -29,7 +29,7 @@ import org.apache.iceberg.io.WriteResult;
 
 @Internal
 public class SinkWriteResultSerializer implements SimpleVersionedSerializer<SinkWriteResult> {
- private static final int WRITE_RESULT_VERSION = 1;
+  private static final int WRITE_RESULT_VERSION = 1;
 
   private static final int VERSION = 2;
 
