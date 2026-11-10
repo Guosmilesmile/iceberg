@@ -24,7 +24,10 @@ import javax.annotation.Nullable;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.table.data.RowData;
 import org.apache.iceberg.CombinedScanTask;
+import org.apache.iceberg.DataOperations;
+import org.apache.iceberg.IncrementalAppendScan;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.expressions.Expression;
@@ -43,7 +46,7 @@ import org.apache.iceberg.util.SnapshotUtil;
 @Internal
 class IcebergLookupReader {
 
-  static final long CURRENT_SNAPSHOT = -1L;
+  static final long NO_SNAPSHOT = -1L;
 
   private final Table table;
   private final Schema projectedSchema;
@@ -76,7 +79,7 @@ class IcebergLookupReader {
 
   CloseableIterable<RowData> read(long snapshotId) {
     Schema tableSchema =
-        snapshotId == CURRENT_SNAPSHOT ? table.schema() : SnapshotUtil.schemaFor(table, snapshotId);
+        snapshotId == NO_SNAPSHOT ? table.schema() : SnapshotUtil.schemaFor(table, snapshotId);
 
     RowDataFileScanTaskReader fileReader =
         new RowDataFileScanTaskReader(
@@ -84,11 +87,66 @@ class IcebergLookupReader {
 
     TableScan scan =
         table.newScan().caseSensitive(caseSensitive).project(projectedSchema).filter(filter);
-    if (snapshotId != CURRENT_SNAPSHOT) {
+    if (snapshotId != NO_SNAPSHOT) {
       scan = scan.useSnapshot(snapshotId);
     }
 
     return new LookupIterable(scan.planTasks(), fileReader);
+  }
+
+  CloseableIterable<RowData> readDelta(long fromExclusive, long toInclusive) {
+    if (fromExclusive == toInclusive) {
+      return CloseableIterable.empty();
+    }
+
+    RowDataFileScanTaskReader fileReader =
+        new RowDataFileScanTaskReader(
+            SnapshotUtil.schemaFor(table, toInclusive),
+            projectedSchema,
+            nameMapping,
+            caseSensitive,
+            baseFilters);
+
+    IncrementalAppendScan appendScan =
+        table
+            .newIncrementalAppendScan()
+            .fromSnapshotExclusive(fromExclusive)
+            .toSnapshot(toInclusive)
+            .caseSensitive(caseSensitive)
+            .project(projectedSchema)
+            .filter(filter);
+
+    return new LookupIterable(appendScan.planTasks(), fileReader);
+  }
+
+  boolean isAppendOnlyRange(long fromExclusive, long toInclusive) {
+    if (fromExclusive == toInclusive
+        || fromExclusive == NO_SNAPSHOT
+        || toInclusive == NO_SNAPSHOT) {
+      return false;
+    }
+
+    Snapshot oldest = null;
+    try {
+      for (Snapshot snapshot :
+          SnapshotUtil.ancestorsBetween(toInclusive, fromExclusive, table::snapshot)) {
+        oldest = snapshot;
+
+        String operation = snapshot.operation();
+        if (DataOperations.APPEND.equals(operation)) {
+          if (!snapshot.deleteManifests(table.io()).isEmpty()) {
+            return false;
+          }
+        } else if (!DataOperations.REPLACE.equals(operation)) {
+          return false;
+        }
+      }
+    } catch (RuntimeException e) {
+      return false;
+    }
+
+    Long parentOfOldest = oldest == null ? null : oldest.parentId();
+    return parentOfOldest != null && parentOfOldest == fromExclusive;
   }
 
   private class LookupIterable extends CloseableGroup implements CloseableIterable<RowData> {
